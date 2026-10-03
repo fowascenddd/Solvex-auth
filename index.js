@@ -49,7 +49,7 @@ const MOD_LOG_CHANNEL_ID = env('MOD_LOG_CHANNEL_ID') || '1555984649761722438';
 const DISCORD_CLIENT_ID = env('DISCORD_CLIENT_ID');
 const DISCORD_CLIENT_SECRET = env('DISCORD_CLIENT_SECRET');
 const OAUTH_REDIRECT_URI = env('OAUTH_REDIRECT_URI') || 'https://sinfultpai.up.railway.app/auth/discord/callback';
-const MODAPP_REQUIRE_LOGIN = String(env('MODAPP_REQUIRE_LOGIN') || 'true').toLowerCase() !== 'false';
+const MODAPP_REQUIRE_LOGIN = String(env('MODAPP_REQUIRE_LOGIN') || 'false').toLowerCase() === 'true';
 const modappSessions = new Map();
 
 if (!DISCORD_TOKEN || !GROQ_API_KEY) {
@@ -1073,13 +1073,13 @@ const modappServer = http.createServer(async (req, res) => {
     <div class="card">
       <div class="top">
         <h1>SinfulTpAi Staff Application</h1>
-        <a href="/logout">Logout</a>
+        ${session ? '<a href="/logout">Logout</a>' : '<a href="/auth/discord">Login with Discord</a>'}
       </div>
-      <p class="small">Logged in as <b>${session?.username || 'unknown'}</b></p>
+      ${session ? `<p class="small">Logged in as <b>${session.username}</b></p>` : '<p class="small">You can login with Discord, but login is not required here.</p>'}
       <form id="modapp-form">
-        <label>Discord Username *</label><input name="discordUsername" placeholder="username" value="${session?.username || ''}" readonly required />
+        <label>Discord Username *</label><input name="discordUsername" placeholder="username" value="${session?.username || ''}" ${session ? 'readonly' : ''} required />
         <input type="hidden" name="discordId" value="${session?.id || ''}" />
-        <p class="small">Discord ID: <code>${session?.id || 'unknown'}</code></p>
+        ${session ? `<p class="small">Discord ID: <code>${session.id}</code></p>` : ''}
         <label>Age *</label><input name="age" placeholder="18" required />
         <label>Timezone *</label><input name="timezone" placeholder="PST / EST / GMT" required />
         <label>Applying For *</label>
