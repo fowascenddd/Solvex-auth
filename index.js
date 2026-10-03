@@ -50,8 +50,17 @@ const DISCORD_CLIENT_ID = env('DISCORD_CLIENT_ID');
 const DISCORD_CLIENT_SECRET = env('DISCORD_CLIENT_SECRET');
 const OAUTH_REDIRECT_URI = env('OAUTH_REDIRECT_URI') || 'https://sinfultpai.up.railway.app/auth/discord/callback';
 const MODAPP_REQUIRE_LOGIN = String(env('MODAPP_REQUIRE_LOGIN') || 'false').toLowerCase() === 'true';
-const modappSessions = new Map();
-const modappSubmissions = [];
+const fs = require('fs');
+const path = require('path');
+const DATA_DIR = path.join(__dirname, 'data');
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
+const SESSIONS_FILE = path.join(DATA_DIR, 'modapp_sessions.json');
+const SUBMISSIONS_FILE = path.join(DATA_DIR, 'modapp_submissions.json');
+const loadJson = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return fallback; } };
+const modappSessions = new Map(Object.entries(loadJson(SESSIONS_FILE, {})));
+const modappSubmissions = loadJson(SUBMISSIONS_FILE, []);
+const saveModappSessions = () => { try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Object.fromEntries(modappSessions), null, 2)); } catch (_) {} };
+const saveModappSubmissions = () => { try { fs.writeFileSync(SUBMISSIONS_FILE, JSON.stringify(modappSubmissions.slice(0, 100), null, 2)); } catch (_) {} };
 
 if (!DISCORD_TOKEN || !GROQ_API_KEY) {
   console.error('Missing DISCORD_BOT_TOKEN or GROQ_API_KEY.');
@@ -962,7 +971,7 @@ const modappServer = http.createServer(async (req, res) => {
   <title>SinfulTpAi Login</title>
   <style>
     body { margin: 0; min-height: 100vh; background: #0f0f16; color: white; font-family: system-ui, sans-serif; }
-    .topbar { display:flex; justify-content:center; align-items:center; padding:16px 24px; border-top:2px solid #ec4899; border-bottom:1px solid #2a2a3d; background:#0b0b12; }
+    .topbar { display:flex; justify-content:flex-end; align-items:center; padding:16px 24px; border-top:2px solid #ec4899; border-bottom:1px solid #2a2a3d; background:#0b0b12; }
     .topbar h1 { display:none; }
     .topbar a { background: #ec4899; color: white; text-decoration: none; padding: 12px 24px; border-radius: 999px; font-weight: 800; box-shadow: 0 8px 24px rgba(236,72,153,.35); }
     .content { padding: 32px 24px; }
@@ -1034,6 +1043,7 @@ const modappServer = http.createServer(async (req, res) => {
         ip: loginIp,
       });
       const sessionToken = modappSessionToken;
+      saveModappSessions();
       res.writeHead(302, {
         Location: '/modapp',
         'Set-Cookie': `modapp_session=${encodeURIComponent(sessionToken)}; HttpOnly; Path=/; SameSite=Lax`,
@@ -1048,6 +1058,7 @@ const modappServer = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/logout') {
     const token = getCookies(req).modapp_session;
     if (token) modappSessions.delete(token);
+    saveModappSessions();
     res.writeHead(302, {
       Location: '/modapp',
       'Set-Cookie': 'modapp_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0',
@@ -1251,6 +1262,7 @@ const modappServer = http.createServer(async (req, res) => {
       anythingElse: data.anythingElse,
     });
     while (modappSubmissions.length > 100) modappSubmissions.pop();
+    saveModappSubmissions();
 
     const channel = await client.channels.fetch(MODAPP_CHANNEL_ID);
     if (!channel || typeof channel.send !== 'function') throw new Error('Application channel is not available.');
