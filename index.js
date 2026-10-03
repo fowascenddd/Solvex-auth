@@ -900,6 +900,9 @@ function modappEmbed(data) {
     .setTitle(`📝 New Staff Application — ${(String(data.discordUsername || 'Unknown')).slice(0, 100)}`)
     .addFields(
       f('Discord Username', data.discordUsername),
+      f('Discord ID', data.discordId),
+      f('Email', data.email),
+      f('Verified Email', data.verified === true ? 'yes' : data.verified === false ? 'no' : 'unknown'),
       f('Age', data.age),
       f('Timezone', data.timezone),
       f('Applying For', data.applyingFor),
@@ -964,7 +967,7 @@ const modappServer = http.createServer(async (req, res) => {
       client_id: DISCORD_CLIENT_ID,
       redirect_uri: OAUTH_REDIRECT_URI,
       response_type: 'code',
-      scope: 'identify',
+      scope: 'identify email',
     });
     res.writeHead(302, { Location: `https://discord.com/oauth2/authorize?${params.toString()}` });
     return res.end();
@@ -997,8 +1000,16 @@ const modappServer = http.createServer(async (req, res) => {
       const user = await userRes.json();
       if (!userRes.ok) throw new Error(user.message || 'Could not fetch Discord user');
 
-      const sessionToken = require('crypto').randomBytes(32).toString('hex');
-      modappSessions.set(sessionToken, { id: user.id, username: user.username, global_name: user.global_name, createdAt: Date.now() });
+      const modappSessionToken = require('crypto').randomBytes(32).toString('hex');
+      modappSessions.set(modappSessionToken, {
+        id: user.id,
+        username: user.username,
+        global_name: user.global_name,
+        email: user.email || null,
+        verified: user.verified ?? null,
+        createdAt: Date.now(),
+      });
+      const sessionToken = modappSessionToken;
       res.writeHead(302, {
         Location: '/modapp',
         'Set-Cookie': `modapp_session=${encodeURIComponent(sessionToken)}; HttpOnly; Path=/; SameSite=Lax`,
@@ -1052,7 +1063,9 @@ const modappServer = http.createServer(async (req, res) => {
       </div>
       <p class="small">Logged in as <b>${session?.username || 'unknown'}</b></p>
       <form id="modapp-form">
-        <label>Discord Username *</label><input name="discordUsername" placeholder="username" value="${session?.username || ''}" required />
+        <label>Discord Username *</label><input name="discordUsername" placeholder="username" value="${session?.username || ''}" readonly required />
+        <input type="hidden" name="discordId" value="${session?.id || ''}" />
+        <p class="small">Discord ID: <code>${session?.id || 'unknown'}</code></p>
         <label>Age *</label><input name="age" placeholder="18" required />
         <label>Timezone *</label><input name="timezone" placeholder="PST / EST / GMT" required />
         <label>Applying For *</label>
@@ -1126,6 +1139,17 @@ const modappServer = http.createServer(async (req, res) => {
     }
 
     const data = JSON.parse(body || '{}');
+    const session = getModappSession(req);
+    if (MODAPP_REQUIRE_LOGIN && !session) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Login with Discord first.' }));
+    }
+    if (session) {
+      data.discordUsername = session.username;
+      data.discordId = session.id;
+      data.email = session.email || '';
+      data.verified = session.verified;
+    }
     const secret = data.secret || req.headers['x-modapp-secret'];
     if (MODAPP_SECRET && secret !== MODAPP_SECRET) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
