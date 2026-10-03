@@ -961,16 +961,20 @@ const modappServer = http.createServer(async (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SinfulTpAi Login</title>
   <style>
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f0f16; color: white; font-family: system-ui, sans-serif; }
-    .card { text-align: center; background: #171724; border: 1px solid #2a2a3d; border-radius: 18px; padding: 36px; max-width: 420px; width: calc(100% - 48px); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
-    a { display: inline-block; margin-top: 20px; background: #7c3aed; color: white; text-decoration: none; padding: 14px 20px; border-radius: 12px; font-weight: 800; }
+    body { margin: 0; min-height: 100vh; background: #0f0f16; color: white; font-family: system-ui, sans-serif; }
+    .topbar { display:flex; justify-content:center; align-items:center; padding:16px 24px; border-top:2px solid #ec4899; border-bottom:1px solid #2a2a3d; background:#0b0b12; }
+    .topbar h1 { display:none; }
+    .topbar a { background: #ec4899; color: white; text-decoration: none; padding: 12px 24px; border-radius: 999px; font-weight: 800; box-shadow: 0 8px 24px rgba(236,72,153,.35); }
+    .content { padding: 32px 24px; }
   </style>
 </head>
 <body>
-  <main class="card">
-    <h1>SinfulTpAi</h1>
-    <p>Login with Discord to continue.</p>
-    ${session ? '<p>You are logged in.</p><a href="/modapp">Continue to Application</a>' : '<a href="/auth/discord">Login with Discord</a>'}
+  <nav class="topbar">
+    ${session ? '<a href="/modapp">Open Application</a>' : '<a href="/auth/discord">Login with Discord</a>'}
+  </nav>
+  <main class="content">
+    <h2>Welcome</h2>
+    <p>Use the pink button at the top to login with Discord.</p>
   </main>
 </body>
 </html>`);
