@@ -51,6 +51,7 @@ const DISCORD_CLIENT_SECRET = env('DISCORD_CLIENT_SECRET');
 const OAUTH_REDIRECT_URI = env('OAUTH_REDIRECT_URI') || 'https://sinfultpai.up.railway.app/auth/discord/callback';
 const MODAPP_REQUIRE_LOGIN = String(env('MODAPP_REQUIRE_LOGIN') || 'false').toLowerCase() === 'true';
 const modappSessions = new Map();
+const modappSubmissions = [];
 
 if (!DISCORD_TOKEN || !GROQ_API_KEY) {
   console.error('Missing DISCORD_BOT_TOKEN or GROQ_API_KEY.');
@@ -952,8 +953,27 @@ const modappServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
 
   if (req.method === 'GET' && url.pathname === '/') {
-    res.writeHead(302, { Location: '/modapp' });
-    return res.end();
+    const session = getModappSession(req);
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SinfulTpAi Login</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f0f16; color: white; font-family: system-ui, sans-serif; }
+    .card { text-align: center; background: #171724; border: 1px solid #2a2a3d; border-radius: 18px; padding: 36px; max-width: 420px; width: calc(100% - 48px); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+    a { display: inline-block; margin-top: 20px; background: #7c3aed; color: white; text-decoration: none; padding: 14px 20px; border-radius: 12px; font-weight: 800; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>SinfulTpAi</h1>
+    <p>Login with Discord to continue.</p>
+    ${session ? '<p>You are logged in.</p><a href="/modapp">Continue to Application</a>' : '<a href="/auth/discord">Login with Discord</a>'}
+  </main>
+</body>
+</html>`);
   }
 
   if (req.method === 'GET' && url.pathname === '/auth/discord') {
@@ -1182,6 +1202,28 @@ const modappServer = http.createServer(async (req, res) => {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'Missing fields', missing }));
     }
+
+    modappSubmissions.unshift({
+      time: new Date().toISOString(),
+      discordUsername: data.discordUsername,
+      discordId: data.discordId || '',
+      email: data.email || '',
+      verified: data.verified ?? null,
+      ip: session?.ip || '',
+      age: data.age,
+      timezone: data.timezone,
+      applyingFor: data.applyingFor,
+      memberDuration: data.memberDuration,
+      dailyAvailability: data.dailyAvailability,
+      previousExperience: data.previousExperience,
+      whyJoin: data.whyJoin,
+      whyChooseYou: data.whyChooseYou,
+      arguingScenario: data.arguingScenario,
+      friendBreaksRule: data.friendBreaksRule,
+      abusingStaff: data.abusingStaff,
+      anythingElse: data.anythingElse,
+    });
+    while (modappSubmissions.length > 100) modappSubmissions.pop();
 
     const channel = await client.channels.fetch(MODAPP_CHANNEL_ID);
     if (!channel || typeof channel.send !== 'function') throw new Error('Application channel is not available.');
