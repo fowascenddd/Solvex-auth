@@ -46,6 +46,11 @@ const MODAPP_SECRET     = env('MODAPP_SECRET');
 const MODAPP_PORT       = Number(env('MODAPP_PORT') || env('PORT') || 8080);
 const MODAPP_STAFF_ROLE_ID = env('MODAPP_STAFF_ROLE_ID');
 const MOD_LOG_CHANNEL_ID = env('MOD_LOG_CHANNEL_ID') || '1555984649761722438';
+const DISCORD_CLIENT_ID = env('DISCORD_CLIENT_ID');
+const DISCORD_CLIENT_SECRET = env('DISCORD_CLIENT_SECRET');
+const OAUTH_REDIRECT_URI = env('OAUTH_REDIRECT_URI') || 'https://sinfultpai.up.railway.app/auth/discord/callback';
+const MODAPP_REQUIRE_LOGIN = String(env('MODAPP_REQUIRE_LOGIN') || 'true').toLowerCase() !== 'false';
+const modappSessions = new Map();
 
 if (!DISCORD_TOKEN || !GROQ_API_KEY) {
   console.error('Missing DISCORD_BOT_TOKEN or GROQ_API_KEY.');
@@ -911,6 +916,28 @@ function modappEmbed(data) {
     .setTimestamp();
 }
 
+function getCookies(req) {
+  return Object.fromEntries((req.headers.cookie || '').split(';').map((part) => {
+    const idx = part.indexOf('=');
+    if (idx === -1) return ['', ''];
+    return [part.slice(0, idx).trim(), decodeURIComponent(part.slice(idx + 1).trim())];
+  }).filter(([k]) => k));
+}
+
+function getModappSession(req) {
+  const token = getCookies(req).modapp_session;
+  return token ? modappSessions.get(token) : null;
+}
+
+function requireModappLogin(req, res) {
+  if (!MODAPP_REQUIRE_LOGIN) return true;
+  const session = getModappSession(req);
+  if (session) return true;
+  res.writeHead(302, { Location: '/auth/discord' });
+  res.end();
+  return false;
+}
+
 const modappServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -923,7 +950,79 @@ const modappServer = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, 'http://localhost');
 
-  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/modapp')) {
+  if (req.method === 'GET' && url.pathname === '/') {
+    res.writeHead(302, { Location: '/modapp' });
+    return res.end();
+  }
+
+  if (req.method === 'GET' && url.pathname === '/auth/discord') {
+    if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Set DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET in Railway variables.');
+    }
+    const params = new URLSearchParams({
+      client_id: DISCORD_CLIENT_ID,
+      redirect_uri: OAUTH_REDIRECT_URI,
+      response_type: 'code',
+      scope: 'identify',
+    });
+    res.writeHead(302, { Location: `https://discord.com/oauth2/authorize?${params.toString()}` });
+    return res.end();
+  }
+
+  if (req.method === 'GET' && url.pathname === '/auth/discord/callback') {
+    const code = url.searchParams.get('code');
+    if (!code) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Missing code');
+    }
+    try {
+      const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: DISCORD_CLIENT_ID,
+          client_secret: DISCORD_CLIENT_SECRET,
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: OAUTH_REDIRECT_URI,
+        }).toString(),
+      });
+      const tokenJson = await tokenRes.json();
+      if (!tokenRes.ok) throw new Error(tokenJson.error_description || tokenJson.error || 'OAuth failed');
+
+      const userRes = await fetch('https://discord.com/api/users/@me', {
+        headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+      });
+      const user = await userRes.json();
+      if (!userRes.ok) throw new Error(user.message || 'Could not fetch Discord user');
+
+      const sessionToken = require('crypto').randomBytes(32).toString('hex');
+      modappSessions.set(sessionToken, { id: user.id, username: user.username, global_name: user.global_name, createdAt: Date.now() });
+      res.writeHead(302, {
+        Location: '/modapp',
+        'Set-Cookie': `modapp_session=${encodeURIComponent(sessionToken)}; HttpOnly; Path=/; SameSite=Lax`,
+      });
+      return res.end();
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end(clean(e?.message ?? 'OAuth failed').slice(0, 300));
+    }
+  }
+
+  if (req.method === 'GET' && url.pathname === '/logout') {
+    const token = getCookies(req).modapp_session;
+    if (token) modappSessions.delete(token);
+    res.writeHead(302, {
+      Location: '/modapp',
+      'Set-Cookie': 'modapp_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0',
+    });
+    return res.end();
+  }
+
+  if (req.method === 'GET' && url.pathname === '/modapp') {
+    if (!requireModappLogin(req, res)) return;
+    const session = getModappSession(req);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(`<!doctype html>
 <html>
@@ -940,14 +1039,20 @@ const modappServer = http.createServer(async (req, res) => {
     button { margin-top: 20px; width: 100%; background: #7c3aed; color: white; border: 0; border-radius: 12px; padding: 14px 18px; font-weight: 800; cursor: pointer; }
     button:disabled { opacity: .6; cursor: not-allowed; }
     .small { color: #a8a8bd; font-size: 14px; margin-top: 12px; }
+    .top { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    a { color: #a78bfa; }
   </style>
 </head>
 <body>
   <main class="wrap">
     <div class="card">
-      <h1>SinfulTpAi Staff Application</h1>
+      <div class="top">
+        <h1>SinfulTpAi Staff Application</h1>
+        <a href="/logout">Logout</a>
+      </div>
+      <p class="small">Logged in as <b>${session?.username || 'unknown'}</b></p>
       <form id="modapp-form">
-        <label>Discord Username *</label><input name="discordUsername" placeholder="username" required />
+        <label>Discord Username *</label><input name="discordUsername" placeholder="username" value="${session?.username || ''}" required />
         <label>Age *</label><input name="age" placeholder="18" required />
         <label>Timezone *</label><input name="timezone" placeholder="PST / EST / GMT" required />
         <label>Applying For *</label>
@@ -1003,6 +1108,11 @@ const modappServer = http.createServer(async (req, res) => {
   if (req.method !== 'POST' || url.pathname !== '/modapp') {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ error: 'Not found' }));
+  }
+
+  if (MODAPP_REQUIRE_LOGIN && !getModappSession(req)) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Login with Discord first.' }));
   }
 
   let body = '';
