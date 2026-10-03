@@ -64,6 +64,7 @@ Normal users need the matching Discord permission and must outrank the target's 
 | `MODAPP_PORT` | no | Webhook server port for form submissions. Default `8080` |
 | `MODAPP_STAFF_ROLE_ID` | no | Role allowed to accept/decline applications, in addition to staff with Manage Server |
 | `MOD_LOG_CHANNEL_ID` | no | Channel for message delete and role change logs. Default `1555984649761722438` |
+| `DATA_DIR` | no | Where sessions/submissions are saved. Use `/data` on Railway with a volume. |
 
 Note: Groq does not provide text-to-image generation, so `/imagine` is not available with this backend.
 

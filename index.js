@@ -52,7 +52,7 @@ const OAUTH_REDIRECT_URI = env('OAUTH_REDIRECT_URI') || 'https://sinfultpai.up.r
 const MODAPP_REQUIRE_LOGIN = String(env('MODAPP_REQUIRE_LOGIN') || 'false').toLowerCase() === 'true';
 const fs = require('fs');
 const path = require('path');
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
 const SESSIONS_FILE = path.join(DATA_DIR, 'modapp_sessions.json');
 const SUBMISSIONS_FILE = path.join(DATA_DIR, 'modapp_submissions.json');
