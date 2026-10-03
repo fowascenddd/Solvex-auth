@@ -8,31 +8,94 @@ const STOP_NOTES = {
   empty:  'the model stopped responding',
 };
 
+// ── key pool ──────────────────────────────────────────────────────────────────
+// Reads GROQ_API_KEYS (comma-separated) and GROQ_API_KEY from env and dedupes.
+// On a 429 the key is cooled down for COOLDOWN_MS before being tried again;
+// all other errors are not penalised so one bad key doesn't starve the others.
+const COOLDOWN_MS = 60 * 1000;
+
+function createKeyPool(keys) {
+  const pool = [...new Set(keys.filter(Boolean))].map((k) => ({
+    key:       k,
+    coolUntil: 0,
+    uses:      0,
+    hits429:   0,
+  }));
+  if (!pool.length) throw new Error('No Groq API keys configured.');
+
+  let idx = 0;
+
+  function pick() {
+    const now = Date.now();
+    // Try in round-robin order; skip any key that is still cooling down.
+    for (let i = 0; i < pool.length; i++) {
+      const k = pool[(idx + i) % pool.length];
+      if (k.coolUntil <= now) {
+        idx = (idx + 1) % pool.length;
+        return k;
+      }
+    }
+    // All cooled — return the one whose cooldown expires soonest.
+    return pool.reduce((a, b) => (a.coolUntil < b.coolUntil ? a : b));
+  }
+
+  function penalise(key) {
+    const entry = pool.find((k) => k.key === key);
+    if (entry) {
+      entry.coolUntil = Date.now() + COOLDOWN_MS;
+      entry.hits429++;
+    }
+  }
+
+  function status() {
+    const now = Date.now();
+    return pool.map((k, i) => ({
+      index:    i,
+      uses:     k.uses,
+      hits429:  k.hits429,
+      cooling:  k.coolUntil > now ? Math.ceil((k.coolUntil - now) / 1000) + 's' : 'ready',
+    }));
+  }
+
+  return { pick, penalise, status, size: pool.length };
+}
+
+// ── factory ───────────────────────────────────────────────────────────────────
 function createAI({
-  apiKey,
+  apiKey,           // single key (legacy / env GROQ_API_KEY)
+  apiKeys,          // array of keys (env GROQ_API_KEYS or explicit list)
   baseUrl = 'https://api.groq.com/openai',
-  model   = 'openai/gpt-oss-20b',
+  model   = 'openai/gpt-oss-120b',
   scrub   = (s) => s,
 }) {
-  const base = String(baseUrl).replace(/\/+$/, '');
+  const allKeys = [...(apiKeys || []), ...(apiKey ? [apiKey] : [])];
+  const pool    = createKeyPool(allKeys);
+  const base    = String(baseUrl).replace(/\/+$/, '');
+
+  console.log(`[ai] Loaded ${pool.size} Groq API key(s).`);
 
   async function request(path, { method = 'GET', body, timeoutMs = 60000 } = {}) {
     let lastErr;
-    for (let attempt = 0; attempt < 3; attempt++) {
+
+    // Up to 3 attempts; on 429 we switch key and retry immediately.
+    for (let attempt = 0; attempt < pool.size * 2 + 3; attempt++) {
+      const entry = pool.pick();
+      entry.uses++;
+
       const ctrl  = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), timeoutMs);
       let res, text;
       try {
         res  = await fetch(base + path, {
           method,
-          headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+          headers: { Authorization: 'Bearer ' + entry.key, 'Content-Type': 'application/json' },
           body: body ? JSON.stringify(body) : undefined,
           signal: ctrl.signal,
         });
         text = await res.text();
       } catch (e) {
         lastErr = new Error(e?.name === 'AbortError' ? 'Request timed out — try a shorter input.' : 'Could not reach the AI service.');
-        await sleep(1200 * (attempt + 1));
+        await sleep(1200 * Math.min(attempt + 1, 3));
         continue;
       } finally {
         clearTimeout(timer);
@@ -46,36 +109,41 @@ function createAI({
       const err    = new Error('AI error ' + res.status + ': ' + scrub(String(detail)).slice(0, 200));
       err.status   = res.status;
 
-      // Retry on rate-limit or server errors
-      if (res.status === 429 || res.status >= 500) {
+      if (res.status === 429) {
+        // Cool this key down and immediately try another key on the next loop pass.
+        pool.penalise(entry.key);
         lastErr = err;
-        await sleep(2000 * (attempt + 1));
+        // Only sleep if we're running out of keys.
+        const allCooling = pool.status().every((s) => s.cooling !== 'ready');
+        if (allCooling) await sleep(2000);
         continue;
       }
 
-      // Context too long — surface a helpful error immediately
+      if (res.status >= 500) {
+        lastErr = err;
+        await sleep(2000 * Math.min(attempt + 1, 3));
+        continue;
+      }
+
       if (res.status === 400 && String(detail).toLowerCase().includes('context')) {
         throw new Error('That input is too long for me to process. Try summarising or splitting it.');
       }
 
       throw err;
     }
-    throw lastErr || new Error('AI request failed after 3 attempts.');
+    throw lastErr || new Error('AI request failed — all keys may be rate-limited.');
   }
 
-  // Core chat — trims message history if the context is too long, then retries.
   async function chat(messages, { maxTokens = 2000, temperature } = {}) {
     const body = { model, messages, max_tokens: maxTokens, stream: false };
     if (temperature !== undefined) body.temperature = temperature;
 
     for (let trim = 0; trim <= 3; trim++) {
-      // Each trim pass removes the 2 oldest non-system messages from history
       const trimmed = trim === 0
         ? messages
         : (() => {
             const sys  = messages.filter((m) => m.role === 'system');
             const rest = messages.filter((m) => m.role !== 'system');
-            // Drop oldest pairs first; keep at least the last user message
             const drop = Math.min(trim * 2, Math.max(0, rest.length - 1));
             return [...sys, ...rest.slice(drop)];
           })();
@@ -88,7 +156,6 @@ function createAI({
         const text   = (choice.message?.content ?? '').trim();
         const finish = choice.finish_reason || 'stop';
 
-        // Empty reply — retry once with a nudge rather than giving up
         if (!text) {
           if (trim < 3) continue;
           return { text: "I couldn't come up with a response for that. Try rephrasing or breaking it into smaller parts.", finish: 'stop' };
@@ -96,7 +163,6 @@ function createAI({
 
         return { text, finish };
       } catch (e) {
-        // If context_length error, trim and retry; otherwise rethrow
         const msg = (e?.message ?? '').toLowerCase();
         if ((msg.includes('context') || msg.includes('token') || msg.includes('length')) && trim < 3) {
           await sleep(500);
@@ -109,14 +175,13 @@ function createAI({
     return { text: "I couldn't process that — the input may be too large. Try breaking it into smaller parts.", finish: 'stop' };
   }
 
-  // Long code generation — continues across multiple rounds until done or capped
   async function generateCode({
     system,
     prompt,
-    maxBytes   = 2 * 1024 * 1024,
-    maxRounds  = 60,
+    maxBytes    = 2 * 1024 * 1024,
+    maxRounds   = 60,
     chunkTokens = 8000,
-    deadlineMs = 13 * 60 * 1000,
+    deadlineMs  = 13 * 60 * 1000,
     onProgress,
   }) {
     const started = Date.now();
@@ -132,8 +197,8 @@ function createAI({
       const bytes = Buffer.byteLength(out);
       if (onProgress) onProgress({ rounds, bytes });
       if (finish !== 'length') break;
-      if (!text)            { reason = 'empty';  break; }
-      if (bytes >= maxBytes){ reason = 'size';   break; }
+      if (!text)              { reason = 'empty';  break; }
+      if (bytes >= maxBytes)  { reason = 'size';   break; }
       if (rounds >= maxRounds){ reason = 'rounds'; break; }
       if (Date.now() - started > deadlineMs){ reason = 'time'; break; }
       messages = [

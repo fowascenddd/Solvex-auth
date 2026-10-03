@@ -12,17 +12,40 @@ const {
   ChannelType,
   MessageFlags,
   ActivityType,
+  PermissionFlagsBits: P,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  AuditLogEvent,
 } = require('discord.js');
+const http = require('node:http');
 const { createAI } = require('./src/ai');
 const { neutralizeMentions, createScrubber } = require('./src/security');
 const { chunkText } = require('./src/util');
 const { systemFor, LUAU_SYSTEM } = require('./src/prompts');
 const { readAttachments, buildPromptText, download, MAX_TEXT_BYTES } = require('./src/attachments');
+const { createMod } = require('./src/mod');
+const { createBuilder } = require('./src/builder');
 
 const env = (name) => String(process.env[name] || '').trim().replace(/^["'`]+|["'`]+$/g, '').trim();
 const DISCORD_TOKEN = (env('DISCORD_BOT_TOKEN') || env('DISCORD_TOKEN')).replace(/^Bot\s+/i, '');
 const GROQ_API_KEY  = env('GROQ_API_KEY') || env('GROQ_KEY');
 const GUILD_ID      = env('GUILD_ID');
+// Multi-key pool: GROQ_API_KEYS is a comma-separated list of extra keys (fallbacks on 429).
+// GROQ_API_KEY is always included as the primary key.
+const GROQ_API_KEYS_EXTRA = env('GROQ_API_KEYS')
+  .split(/[,\n\r\t ]+/)
+  .map((k) => k.trim())
+  .filter(Boolean);
+// Only this Discord user ID can make the AI give roles/permissions or ban/kick/timeout.
+const OWNER_ID      = env('OWNER_ID') || '1088143400496279552';
+// Staff application form webhook/channel.
+const MODAPP_CHANNEL_ID = env('MODAPP_CHANNEL_ID') || '1555973537582284831';
+const MODAPP_URL        = env('MODAPP_URL') || 'https://sinfultpai.up.railway.app/modapp';
+const MODAPP_SECRET     = env('MODAPP_SECRET');
+const MODAPP_PORT       = Number(env('MODAPP_PORT') || env('PORT') || 8080);
+const MODAPP_STAFF_ROLE_ID = env('MODAPP_STAFF_ROLE_ID');
+const MOD_LOG_CHANNEL_ID = env('MOD_LOG_CHANNEL_ID') || '1555984649761722438';
 
 if (!DISCORD_TOKEN || !GROQ_API_KEY) {
   console.error('Missing DISCORD_BOT_TOKEN or GROQ_API_KEY.');
@@ -34,11 +57,14 @@ const clean  = (text) => scrub(neutralizeMentions(text));
 const NO_PINGS = { parse: [], repliedUser: false };
 
 const ai = createAI({
-  apiKey:      GROQ_API_KEY,
+  apiKeys:     [GROQ_API_KEY, ...GROQ_API_KEYS_EXTRA],
   baseUrl:     env('GROQ_BASE_URL') || 'https://api.groq.com/openai',
-  model:       env('GROQ_MODEL')    || 'openai/gpt-oss-20b',
+  model:       env('GROQ_MODEL')    || 'openai/gpt-oss-120b',
   scrub,
 });
+
+const mod     = createMod({ ownerId: OWNER_ID, clean, noPings: NO_PINGS });
+const builder = createBuilder({ ai, ownerId: OWNER_ID, clean });
 
 const MAX_FILE_BYTES      = 2 * 1024 * 1024;
 const MAX_INPUT_FILE_BYTES = 300 * 1024;
@@ -176,8 +202,19 @@ const commands = [
     .addStringOption((o) => o.setName('option4').setDescription('Option 4 (optional)').setMaxLength(80)),
 
   new SlashCommandBuilder()
+    .setName('build')
+    .setDescription('Tell the AI to build or change channels, categories and more (shows a plan to confirm)')
+    .setDMPermission(false)
+    .addStringOption((o) => o.setName('request').setDescription('e.g. build a gaming server with voice channels').setRequired(true).setMaxLength(3000))
+    .addUserOption((o) => o.setName('user').setDescription('Optional user to include (for ban/role requests)')),
+
+  new SlashCommandBuilder()
     .setName('reset')
     .setDescription('Clear my memory of our conversation here'),
+
+  new SlashCommandBuilder()
+    .setName('modapp')
+    .setDescription('Get the link to the SinfulTpAi staff application form'),
 ];
 
 // ── command handler ───────────────────────────────────────────────────────────
@@ -188,6 +225,29 @@ async function handle(i) {
   if (name === 'reset') {
     memory.delete(memKey(i.channelId, i.user.id));
     return i.reply({ content: '🧹 Memory cleared.', ...EPHEMERAL });
+  }
+
+  // ── /modapp ───────────────────────────────────────────────────────────────────
+  if (name === 'modapp') {
+    if (!MODAPP_URL) {
+      return i.reply({ content: 'Set `MODAPP_URL` in the bot environment to your staff application form URL.', ...EPHEMERAL });
+    }
+    return i.reply({ content: `Apply for SinfulTpAi staff here: ${MODAPP_URL}` });
+  }
+
+  // ── /build ──────────────────────────────────────────────────────────────────
+  if (name === 'build') {
+    if (!i.inGuild() || !i.guild) return i.reply({ content: 'Use this inside a server.', ...EPHEMERAL });
+    if (!builder.canBuild(i.member)) return i.reply({ content: 'You need the Manage Channels permission to use this.', ...EPHEMERAL });
+    const wait = cooldown(i.user.id, 'build', 8000);
+    if (wait) return i.reply({ content: `Slow down — try again in ${wait}s.`, ...EPHEMERAL });
+    await i.deferReply();
+    let text = i.options.getString('request', true);
+    const target = i.options.getUser('user');
+    if (target) text += ` <@${target.id}>`;
+    const result = await builder.plan({ guild: i.guild, text });
+    if (!result) return i.editReply({ content: "I couldn't turn that into server actions. Try being more specific." });
+    return i.editReply(builder.preview(result, { userId: i.user.id, guildId: i.guildId }));
   }
 
   // ── /ask ────────────────────────────────────────────────────────────────────
@@ -371,12 +431,41 @@ async function handle(i) {
   }
 }
 
+async function handleModappButton(i) {
+  const member = i.member;
+  const isStaff =
+    i.user.id === OWNER_ID ||
+    member?.permissions?.has(P.ManageGuild) ||
+    (MODAPP_STAFF_ROLE_ID && member?.roles?.cache?.has(MODAPP_STAFF_ROLE_ID));
+
+  if (!isStaff) {
+    return i.reply({ content: 'Only staff can review applications.', ...EPHEMERAL });
+  }
+
+  const accepted = i.customId === 'modapp_accept';
+  const embed = EmbedBuilder.from(i.message.embeds[0]);
+  embed
+    .setColor(accepted ? 0x22c55e : 0xef4444)
+    .setTitle(accepted ? '✅ Staff Application Accepted' : '❌ Staff Application Declined')
+    .addFields({ name: 'Reviewed by', value: `<@${i.user.id}>`, inline: true });
+
+  await i.update({ embeds: [embed], components: [] });
+}
+
 client.on(Events.InteractionCreate, async (i) => {
-  if (!i.isChatInputCommand()) return;
   try {
+    if (i.isButton()) {
+      if (i.customId === 'modapp_accept' || i.customId === 'modapp_decline') {
+        await handleModappButton(i);
+        return;
+      }
+      await builder.handleButton(i);
+      return;
+    }
+    if (!i.isChatInputCommand()) return;
     await handle(i);
   } catch (e) {
-    console.error('[command error]', i.commandName, scrub(e?.message ?? e));
+    console.error('[interaction error]', i.commandName || i.customId, scrub(e?.message ?? e));
     const msg = clean('Something went wrong: ' + (e?.message ?? 'unknown error')).slice(0, 300);
     if (i.deferred || i.replied) await i.editReply({ content: msg }).catch(() => {});
     else await i.reply({ content: msg, ...EPHEMERAL }).catch(() => {});
@@ -401,19 +490,249 @@ function helpEmbed() {
         '`/summarize` — summarize recent messages in this channel',
         '`/poll` — create a quick reaction poll with up to 4 options',
         '`/reset` — clear my memory of our chat',
+        '`/modapp` — get the staff application form link',
         '`.help` — show this menu',
+        '',
+        '**Moderation (prefix `?`)**',
+        '`?ban @user [reason]` • `?unban id` • `?kick @user [reason]`',
+        '`?to @user [10m|2h|1d] [reason]` — timeout • `?untimeout @user`',
+        '`?lock` / `?unlock` — lock or unlock the channel you use it in',
+        '',
+        '**Role creation**',
+        '`.createrole <role name> <perms>` — create a role with `all`, `admin`, or `none` permissions',
+        '`.giverole <user> <role name>` — give a role to a user',
+        '`.leaderboard` / `.invites` — show who has the most invites',
+        '`.slowmodeOn` / `.slowmodeOff` — set 8s slowmode or turn it off',
+        '`.purge <1-100>` — delete recent messages in this channel',
+        '',
+        '**AI server builder**',
+        '`?build <what you want>` or `/build` — I make a plan, you press Run it',
+        'Roles, permissions, bans and kicks through the AI are owner-only.',
       ].join('\n'),
     )
     .setFooter({ text: 'sinfultp ai • powered by Groq' });
+}
+
+const BUILD_HINT =
+  /\b(creat|make|build|set\s?up|add|delet|remov|renam|mov|edit|chang|organi[sz]|revamp|give|grant|assign|lock)\w*\b[\s\S]*\b(channels?|categor(y|ies)|server|roles?|perms?|permissions?|vc|voice)\b|\b(ban|kick|time\s?out)\b\s*<@!?\d+>/i;
+
+// Plans a server change from plain text and shows the confirm buttons.
+// With fallback=true (mention flow) it stays quiet and returns false so normal chat can answer.
+async function runBuild(m, text, fallback) {
+  const member = m.member || (await m.guild.members.fetch(m.author.id).catch(() => null));
+  if (!builder.canBuild(member)) {
+    if (!fallback) await m.reply({ content: 'You need the Manage Channels permission to use `?build`.', allowedMentions: NO_PINGS });
+    return false;
+  }
+  if (!text.trim()) {
+    if (!fallback) await m.reply({ content: 'Tell me what to build, e.g. `?build a gaming server with voice channels`.', allowedMentions: NO_PINGS });
+    return false;
+  }
+  const wait = cooldown(m.author.id, 'build', 8000);
+  if (wait) {
+    if (!fallback) await m.reply({ content: `Slow down — try again in ${wait}s.`, allowedMentions: NO_PINGS });
+    return false;
+  }
+  await m.channel.sendTyping();
+  const result = await builder.plan({ guild: m.guild, text });
+  if (!result) {
+    if (!fallback) await m.reply({ content: "I couldn't turn that into server actions. Try being more specific.", allowedMentions: NO_PINGS });
+    return false;
+  }
+  await m.reply(builder.preview(result, { userId: m.author.id, guildId: m.guildId }));
+  return true;
 }
 
 client.on(Events.MessageCreate, async (m) => {
   try {
     if (m.author.bot) return;
 
-    if (/^\.help\s*$/i.test(m.content.trim())) {
+    if (/^[.?]help\s*$/i.test(m.content.trim())) {
       await m.reply({ embeds: [helpEmbed()], allowedMentions: NO_PINGS });
       return;
+    }
+
+    // ── .createrole: create a role with a permission preset ──
+    if (m.guild && /^\.createrole\b/i.test(m.content.trim())) {
+      const rest = m.content.trim().replace(/^\.createrole\b/i, '').trim();
+      const parts = rest.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) {
+        await m.reply({ content: 'Usage: `.createrole <role name> <perms> all|admin|none`', allowedMentions: NO_PINGS });
+        return;
+      }
+      const permKind = parts.pop().toLowerCase();
+      const roleName = parts.join(' ').trim();
+      if (!roleName || roleName.length > 100) {
+        await m.reply({ content: 'Role name must be 1–100 characters.', allowedMentions: NO_PINGS });
+        return;
+      }
+      if (!['all', 'admin', 'none'].includes(permKind)) {
+        await m.reply({ content: 'Perms must be `all`, `admin`, or `none`.', allowedMentions: NO_PINGS });
+        return;
+      }
+
+      const member = m.member || (await m.guild.members.fetch(m.author.id).catch(() => null));
+      if (!member) {
+        await m.reply({ content: 'Could not read your server permissions.', allowedMentions: NO_PINGS });
+        return;
+      }
+      const canManage = m.author.id === OWNER_ID || m.author.id === m.guild.ownerId || member.permissions.has(P.ManageRoles);
+      if (!canManage) {
+        await m.reply({ content: 'You need the Manage Roles permission to create roles.', allowedMentions: NO_PINGS });
+        return;
+      }
+      const me = m.guild.members.me;
+      if (!me?.permissions.has(P.ManageRoles)) {
+        await m.reply({ content: "I need the Manage Roles permission to do that.", allowedMentions: NO_PINGS });
+        return;
+      }
+
+      let permissions;
+      if (permKind === 'none') permissions = [];
+      else if (permKind === 'admin') permissions = [P.Administrator];
+      else permissions = Object.values(P).filter((v) => typeof v === 'bigint');
+
+      try {
+        const role = await m.guild.roles.create({
+          name: roleName,
+          permissions,
+          reason: `${m.author.username}: .createrole ${roleName} (${permKind})`,
+        });
+        await m.reply({ content: `Created role **${role.name}** with \`${permKind}\` permissions.`, allowedMentions: NO_PINGS });
+      } catch (e) {
+        await m.reply({ content: `Could not create that role: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, allowedMentions: NO_PINGS });
+      }
+      return;
+    }
+
+    // ── .leaderboard / .invites: top inviters ──
+    if (m.guild && /^\.(leaderboard|invites)\b/i.test(m.content.trim())) {
+      try {
+        const invites = await m.guild.invites.fetch();
+        const counts = new Map();
+        for (const invite of invites.values()) {
+          const inviter = invite.inviter;
+          if (!inviter) continue;
+          const key = inviter.id;
+          const prev = counts.get(key) || { user: inviter, uses: 0, invites: 0 };
+          prev.uses += invite.uses ?? 0;
+          prev.invites += 1;
+          counts.set(key, prev);
+        }
+        const top = [...counts.values()].sort((a, b) => b.uses - a.uses).slice(0, 10);
+        if (!top.length) {
+          return m.reply({ content: 'No invite data found yet.', allowedMentions: NO_PINGS });
+        }
+        const lines = top.map((entry, index) => `**${index + 1}.** ${entry.user.username} — ${entry.uses} invite${entry.uses === 1 ? '' : 's'} (${entry.invites} link${entry.invites === 1 ? '' : 's'})`);
+        return m.reply({ content: `🏆 **Invite Leaderboard**\n${lines.join('\n')}`, allowedMentions: NO_PINGS });
+      } catch (e) {
+        return m.reply({ content: `I could not fetch invites. I may need Manage Server permission. (${clean(e?.message ?? 'unknown error').slice(0, 120)})`, allowedMentions: NO_PINGS });
+      }
+    }
+
+    // ── .giverole <user> <role name> ──
+    if (m.guild && /^\.giverole\b/i.test(m.content.trim())) {
+      const rest = m.content.trim().replace(/^\.giverole\b/i, '').trim();
+      const match = /^<@!?(\d{17,20})>\s+(.+)$|^(\d{17,20})\s+(.+)$/.exec(rest);
+      if (!match) {
+        return m.reply({ content: 'Usage: `.giverole <user> <role name>`', allowedMentions: NO_PINGS });
+      }
+      const userId = match[1] || match[3];
+      const roleName = (match[2] || match[4] || '').trim();
+      if (!roleName) return m.reply({ content: 'Usage: `.giverole <user> <role name>`', allowedMentions: NO_PINGS });
+
+      const member = m.member || (await m.guild.members.fetch(m.author.id).catch(() => null));
+      if (!member) return m.reply({ content: 'Could not read your server permissions.', allowedMentions: NO_PINGS });
+      const canManage = m.author.id === OWNER_ID || m.author.id === m.guild.ownerId || member.permissions.has(P.ManageRoles);
+      if (!canManage) return m.reply({ content: 'You need the Manage Roles permission to give roles.', allowedMentions: NO_PINGS });
+
+      const target = await m.guild.members.fetch(userId).catch(() => null);
+      if (!target) return m.reply({ content: 'That user is not in this server.', allowedMentions: NO_PINGS });
+
+      const role = m.guild.roles.cache.find((r) => r.name.toLowerCase() === roleName.toLowerCase());
+      if (!role) return m.reply({ content: `I could not find a role named **${roleName}**.`, allowedMentions: NO_PINGS });
+
+      const me = m.guild.members.me;
+      if (!me?.permissions.has(P.ManageRoles)) return m.reply({ content: 'I need the Manage Roles permission for that.', allowedMentions: NO_PINGS });
+      if (me.roles.highest.comparePositionTo(role) <= 0) return m.reply({ content: "That role is above my highest role. Move my role higher.", allowedMentions: NO_PINGS });
+
+      try {
+        await target.roles.add(role, `${m.author.username}: .giverole ${target.user.username} ${role.name}`);
+        return m.reply({ content: `Gave **${role.name}** to **${target.user.username}**.`, allowedMentions: NO_PINGS });
+      } catch (e) {
+        return m.reply({ content: `Could not give that role: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, allowedMentions: NO_PINGS });
+      }
+    }
+
+    // ── .purge <message count> ──
+    if (m.guild && /^\.purge\b/i.test(m.content.trim())) {
+      const amountText = m.content.trim().split(/\s+/)[1];
+      const amount = Number(amountText);
+      if (!Number.isInteger(amount) || amount < 1 || amount > 100) {
+        return m.reply({ content: 'Usage: `.purge <1-100>`', allowedMentions: NO_PINGS });
+      }
+      const member = m.member || (await m.guild.members.fetch(m.author.id).catch(() => null));
+      if (!member) return m.reply({ content: 'Could not read your server permissions.', allowedMentions: NO_PINGS });
+      const canManage = m.author.id === OWNER_ID || m.author.id === m.guild.ownerId || member.permissions.has(P.ManageMessages);
+      if (!canManage) return m.reply({ content: 'You need the Manage Messages permission to purge.', allowedMentions: NO_PINGS });
+      if (typeof m.channel.bulkDelete !== 'function') return m.reply({ content: 'I can only purge in a normal text channel.', allowedMentions: NO_PINGS });
+      try {
+        await m.channel.bulkDelete(amount, true);
+        const msg = await m.channel.send({ content: `🧹 Deleted ${amount} message${amount === 1 ? '' : 's'}.`, allowedMentions: NO_PINGS });
+        setTimeout(() => msg.delete().catch(() => {}), 5000);
+        return;
+      } catch (e) {
+        return m.reply({ content: `Could not purge: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, allowedMentions: NO_PINGS });
+      }
+    }
+
+    // ── .slowmodeOn / .slowmodeOff ──
+    if (m.guild && /^\.(slowmodeon|slowmodeoff)\b/i.test(m.content.trim())) {
+      const cmd = m.content.trim().split(/\s+/)[0].slice(1).toLowerCase();
+      const member = m.member || (await m.guild.members.fetch(m.author.id).catch(() => null));
+      if (!member) return m.reply({ content: 'Could not read your server permissions.', allowedMentions: NO_PINGS });
+      const canManage = m.author.id === OWNER_ID || m.author.id === m.guild.ownerId || member.permissions.has(P.ManageChannels);
+      if (!canManage) return m.reply({ content: 'You need the Manage Channels permission to change slowmode.', allowedMentions: NO_PINGS });
+
+      const ch = m.channel;
+      if (typeof ch.setRateLimitPerUser !== 'function') {
+        return m.reply({ content: 'I can only set slowmode in a text channel.', allowedMentions: NO_PINGS });
+      }
+
+      try {
+        if (cmd === 'slowmodeon') {
+          await ch.setRateLimitPerUser(8, `${m.author.username}: .slowmodeOn`);
+          return m.reply({ content: '🐢 Slowmode is on: 8 seconds.', allowedMentions: NO_PINGS });
+        }
+        await ch.setRateLimitPerUser(0, `${m.author.username}: .slowmodeOff`);
+        return m.reply({ content: '🐇 Slowmode is off.', allowedMentions: NO_PINGS });
+      } catch (e) {
+        return m.reply({ content: `Could not change slowmode: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, allowedMentions: NO_PINGS });
+      }
+    }
+
+    // ── dot aliases for moderation commands: .ban, .kick, .lock, etc. ──
+    if (m.guild && /^\.(ban|unban|kick|to|timeout|mute|uto|unmute|untimeout|lock|unlock)\b/i.test(m.content.trim())) {
+      const [rawCmd, ...rest] = m.content.trim().slice(1).split(/\s+/);
+      const cmd = (rawCmd || '').toLowerCase();
+      if (mod.has(cmd)) {
+        await mod.run(m, cmd, rest);
+        return;
+      }
+    }
+
+    // ── ? prefix: moderation + AI builder ──
+    if (m.guild && m.content.startsWith('?')) {
+      const [rawCmd, ...rest] = m.content.slice(1).trim().split(/\s+/);
+      const cmd = (rawCmd || '').toLowerCase();
+      if (cmd === 'build') {
+        await runBuild(m, rest.join(' '), false);
+        return;
+      }
+      if (mod.has(cmd)) {
+        await mod.run(m, cmd, rest);
+        return;
+      }
     }
 
     const isDM     = m.channel.type === ChannelType.DM;
@@ -427,6 +746,11 @@ client.on(Events.MessageCreate, async (m) => {
     let text = m.content.replace(new RegExp('<@!?' + client.user.id + '>', 'g'), '');
     if (botRole) text = text.replace(new RegExp('<@&' + botRole.id + '>', 'g'), '');
     text = text.trim();
+
+    // Mention + something that sounds like building/moderating -> try the builder first.
+    if (m.guild && text && BUILD_HINT.test(text)) {
+      if (await runBuild(m, text, true)) return;
+    }
 
     const attachments = [...m.attachments.values()];
     let quoted = '';
@@ -463,9 +787,88 @@ client.on(Events.MessageCreate, async (m) => {
   }
 });
 
+async function sendModLog(guild, embed) {
+  const channel = await client.channels.fetch(MOD_LOG_CHANNEL_ID).catch(() => null);
+  if (!channel || typeof channel.send !== 'function') return;
+  await channel.send({ embeds: [embed], allowedMentions: NO_PINGS }).catch(() => {});
+}
+
+client.on(Events.MessageDelete, async (msg) => {
+  try {
+    if (!msg.guild || msg.author?.bot) return;
+    const guild = msg.guild;
+    let executor = 'Unknown';
+    try {
+      const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.MessageDelete, limit: 5 });
+      const entry = logs.entries.find((e) => (e.target?.id === msg.author?.id || e.targetId === msg.author?.id) && (e.extra?.channel?.id === msg.channelId || e.channel?.id === msg.channelId || !e.extra));
+      if (entry?.executor) executor = `${entry.executor.username} (${entry.executor.id})`;
+    } catch (_) {}
+
+    const embed = new EmbedBuilder()
+      .setColor(0xef4444)
+      .setTitle('🗑️ Message Deleted')
+      .addFields(
+        { name: 'Deleted by', value: executor.slice(0, 1024), inline: true },
+        { name: 'Author', value: msg.author ? `${msg.author.username} (${msg.author.id})`.slice(0, 1024) : 'Unknown', inline: true },
+        { name: 'Channel', value: `<#${msg.channelId}>`, inline: true },
+        { name: 'Content', value: (msg.content || '(no cached content)').slice(0, 1024) },
+      )
+      .setTimestamp();
+    await sendModLog(guild, embed);
+  } catch (e) {
+    console.error('[modlog delete error]', scrub(e?.message ?? e));
+  }
+});
+
+client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  try {
+    if (!newMember.guild) return;
+    const oldRoles = oldMember.roles?.cache ?? new Map();
+    const newRoles = newMember.roles?.cache ?? new Map();
+    const added = [...newRoles.values()].filter((role) => role.id !== newMember.guild.id && !oldRoles.has(role.id));
+    const removed = [...oldRoles.values()].filter((role) => role.id !== newMember.guild.id && !newRoles.has(role.id));
+    if (!added.length && !removed.length) return;
+
+    let logs = null;
+    try {
+      logs = await newMember.guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 5 });
+    } catch (_) {}
+
+    for (const role of added) {
+      const entry = logs?.entries?.find((e) => e.target?.id === newMember.id && e.changes?.some((c) => c.key === '$add' && (c.new_value || []).some((r) => r.id === role.id)));
+      const embed = new EmbedBuilder()
+        .setColor(0x22c55e)
+        .setTitle('➕ Role Added')
+        .addFields(
+          { name: 'Member', value: `${newMember.user.username} (${newMember.id})`.slice(0, 1024), inline: true },
+          { name: 'Role', value: `${role.name} (${role.id})`.slice(0, 1024), inline: true },
+          { name: 'Added by', value: entry?.executor ? `${entry.executor.username} (${entry.executor.id})`.slice(0, 1024) : 'Unknown', inline: true },
+        )
+        .setTimestamp();
+      await sendModLog(newMember.guild, embed);
+    }
+
+    for (const role of removed) {
+      const entry = logs?.entries?.find((e) => e.target?.id === newMember.id && e.changes?.some((c) => c.key === '$remove' && (c.new_value || []).some((r) => r.id === role.id)));
+      const embed = new EmbedBuilder()
+        .setColor(0xef4444)
+        .setTitle('➖ Role Removed')
+        .addFields(
+          { name: 'Member', value: `${newMember.user.username} (${newMember.id})`.slice(0, 1024), inline: true },
+          { name: 'Role', value: `${role.name} (${role.id})`.slice(0, 1024), inline: true },
+          { name: 'Removed by', value: entry?.executor ? `${entry.executor.username} (${entry.executor.id})`.slice(0, 1024) : 'Unknown', inline: true },
+        )
+        .setTimestamp();
+      await sendModLog(newMember.guild, embed);
+    }
+  } catch (e) {
+    console.error('[modlog role error]', scrub(e?.message ?? e));
+  }
+});
+
 client.once(Events.ClientReady, async (c) => {
   console.log('Logged in as ' + c.user.tag);
-  c.user.setActivity('.help | sinfultp ai', { type: ActivityType.Playing });
+  c.user.setPresence({ activities: [{ name: 'calling babyboo fowa 😏', type: ActivityType.Playing }], status: 'dnd' });
   try {
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
     const body = commands.map((cmd) => cmd.toJSON());
@@ -484,6 +887,172 @@ if (/[^\x21-\x7E]/.test(DISCORD_TOKEN)) {
   console.error('DISCORD_BOT_TOKEN contains spaces or invalid characters.');
   process.exit(1);
 }
+
+function modappEmbed(data) {
+  const f = (name, value) => ({ name, value: (String(value ?? '').trim() || '—').slice(0, 1024) });
+  return new EmbedBuilder()
+    .setColor(0x8b5cf6)
+    .setTitle(`📝 New Staff Application — ${(String(data.discordUsername || 'Unknown')).slice(0, 100)}`)
+    .addFields(
+      f('Discord Username', data.discordUsername),
+      f('Age', data.age),
+      f('Timezone', data.timezone),
+      f('Applying For', data.applyingFor),
+      f('How long have you been in SinfulTpAi?', data.memberDuration),
+      f('Daily Availability', data.dailyAvailability),
+      f('Previous staff experience', data.previousExperience),
+      f('Why do you want to join the SinfulTpAi staff team?', data.whyJoin),
+      f('Why should we choose you?', data.whyChooseYou),
+      f('Two members are arguing. How would you handle it?', data.arguingScenario),
+      f('Your friend breaks a server rule. What do you do?', data.friendBreaksRule),
+      f('You see another staff member abusing permissions. What do you do?', data.abusingStaff),
+      f('Anything else we should know?', data.anythingElse),
+    )
+    .setTimestamp();
+}
+
+const modappServer = http.createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Modapp-Secret');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  const url = new URL(req.url, 'http://localhost');
+
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/modapp')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SinfulTpAi Staff Application</title>
+  <style>
+    body { margin: 0; min-height: 100vh; background: #0f0f16; color: #fff; font-family: system-ui, sans-serif; padding: 32px 16px; }
+    .wrap { max-width: 760px; margin: 0 auto; }
+    .card { background: #171724; border: 1px solid #2a2a3d; border-radius: 18px; padding: 28px; box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+    h1 { margin-top: 0; } label { display: block; margin: 16px 0 6px; font-weight: 700; }
+    input, select, textarea { width: 100%; box-sizing: border-box; background: #0f0f16; color: white; border: 1px solid #33334a; border-radius: 10px; padding: 12px; }
+    textarea { min-height: 90px; resize: vertical; }
+    button { margin-top: 20px; width: 100%; background: #7c3aed; color: white; border: 0; border-radius: 12px; padding: 14px 18px; font-weight: 800; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .small { color: #a8a8bd; font-size: 14px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="card">
+      <h1>SinfulTpAi Staff Application</h1>
+      <form id="modapp-form">
+        <label>Discord Username *</label><input name="discordUsername" placeholder="username" required />
+        <label>Age *</label><input name="age" placeholder="18" required />
+        <label>Timezone *</label><input name="timezone" placeholder="PST / EST / GMT" required />
+        <label>Applying For *</label>
+        <select name="applyingFor" required>
+          <option value="">Choose...</option>
+          <option>Moderator</option>
+          <option>Helper</option>
+          <option>Admin</option>
+          <option>Other</option>
+        </select>
+        <label>How long have you been in SinfulTpAi? *</label><input name="memberDuration" placeholder="Example: 3 months" required />
+        <label>Daily Availability *</label><input name="dailyAvailability" placeholder="Example: 3-5 hours" required />
+        <label>Previous staff experience *</label><textarea name="previousExperience" placeholder="Tell us about previous moderation or staff experience." required></textarea>
+        <label>Why do you want to join the SinfulTpAi staff team? *</label><textarea name="whyJoin" required></textarea>
+        <label>Why should we choose you? *</label><textarea name="whyChooseYou" required></textarea>
+        <label>Two members are arguing. How would you handle it? *</label><textarea name="arguingScenario" required></textarea>
+        <label>Your friend breaks a server rule. What do you do? *</label><textarea name="friendBreaksRule" required></textarea>
+        <label>You see another staff member abusing permissions. What do you do? *</label><textarea name="abusingStaff" required></textarea>
+        <label>Anything else we should know?</label><textarea name="anythingElse"></textarea>
+        <button type="submit">Submit Staff Application</button>
+        <p class="small">By submitting, you confirm the information you provided is accurate and understand that staff permissions may be removed for abuse or rule violations.</p>
+      </form>
+    </div>
+  </main>
+  <script>
+    const form = document.getElementById('modapp-form');
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      const button = form.querySelector('button');
+      button.disabled = true;
+      button.textContent = 'Submitting...';
+      const data = Object.fromEntries(new FormData(form).entries());
+      try {
+        const res = await fetch('/modapp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        const result = await res.json().catch(function () { return {}; });
+        if (!res.ok) throw new Error(result.error || 'Submission failed');
+        form.innerHTML = '<h2>✅ Application submitted. Thanks — SinfulTpAi staff will review it soon.</h2>';
+      } catch (e) {
+        alert(e.message);
+        button.disabled = false;
+        button.textContent = 'Submit Staff Application';
+      }
+    });
+  </script>
+</body>
+</html>`);
+  }
+
+  if (req.method !== 'POST' || url.pathname !== '/modapp') {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Not found' }));
+  }
+
+  let body = '';
+  try {
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > 2_000_000) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Payload too large' }));
+      }
+    }
+
+    const data = JSON.parse(body || '{}');
+    const secret = data.secret || req.headers['x-modapp-secret'];
+    if (MODAPP_SECRET && secret !== MODAPP_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Unauthorized' }));
+    }
+
+    const required = [
+      'discordUsername', 'age', 'timezone', 'applyingFor', 'memberDuration',
+      'dailyAvailability', 'previousExperience', 'whyJoin', 'whyChooseYou',
+      'arguingScenario', 'friendBreaksRule', 'abusingStaff',
+    ];
+    const missing = required.filter((key) => !String(data[key] ?? '').trim());
+    if (missing.length) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Missing fields', missing }));
+    }
+
+    const channel = await client.channels.fetch(MODAPP_CHANNEL_ID);
+    if (!channel || typeof channel.send !== 'function') throw new Error('Application channel is not available.');
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('modapp_accept').setLabel('Accept').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('modapp_decline').setLabel('Decline').setStyle(ButtonStyle.Danger),
+    );
+
+    await channel.send({ embeds: [modappEmbed(data)], components: [row], allowedMentions: NO_PINGS });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true }));
+  } catch (e) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: clean(e?.message ?? 'Bad request').slice(0, 300) }));
+  }
+});
+
+modappServer.listen(MODAPP_PORT, () => {
+  console.log(`Modapp webhook listening on port ${MODAPP_PORT}`);
+});
 
 client.login(DISCORD_TOKEN).catch((e) => {
   console.error('Discord login failed:', scrub(e?.message ?? e));
