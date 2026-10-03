@@ -1062,7 +1062,30 @@ const modappServer = http.createServer(async (req, res) => {
       return res.end('<h1>403 — Owner only</h1>');
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Admin</title></head><body style="background:#111;color:#fff;font-family:system-ui;padding:2rem"><h1>Admin check</h1><p>Discord Username: <b>${session.username}</b></p><p>Discord ID: <code>${session.id}</code></p><p>Email: ${session.email || 'Not authorized / unavailable'}</p><p>Verified Email: ${session.verified === true ? 'yes' : session.verified === false ? 'no' : 'unknown'}</p><p>IP Address: ${session.ip || 'unknown'}</p><p>IP Address: ${session.ip || 'unknown'}</p><p>This page is owner-only. Do not share access to it.</p><a style="color:#a78bfa" href="/modapp">Back to application</a></body></html>`);
+    const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const appList = modappSubmissions.map((a, i) => `
+      <details ${i === 0 ? 'open' : ''}>
+        <summary><b>${esc(a.time)}</b> — ${esc(a.discordUsername)} (${esc(a.discordId)})</summary>
+        <p>Discord Username: ${esc(a.discordUsername)}</p>
+        <p>Discord ID: <code>${esc(a.discordId)}</code></p>
+        <p>Email: ${esc(a.email)}</p>
+        <p>Verified Email: ${a.verified === true ? 'yes' : a.verified === false ? 'no' : 'unknown'}</p>
+        <p>IP Address: ${esc(a.ip)}</p>
+        <p>Age: ${esc(a.age)}</p>
+        <p>Timezone: ${esc(a.timezone)}</p>
+        <p>Applying For: ${esc(a.applyingFor)}</p>
+        <p>How long have you been in SinfulTpAi? ${esc(a.memberDuration)}</p>
+        <p>Daily Availability: ${esc(a.dailyAvailability)}</p>
+        <p>Previous staff experience: ${esc(a.previousExperience)}</p>
+        <p>Why join: ${esc(a.whyJoin)}</p>
+        <p>Why choose you: ${esc(a.whyChooseYou)}</p>
+        <p>Arguing scenario: ${esc(a.arguingScenario)}</p>
+        <p>Friend breaks rule: ${esc(a.friendBreaksRule)}</p>
+        <p>Staff abusing permissions: ${esc(a.abusingStaff)}</p>
+        <p>Anything else: ${esc(a.anythingElse)}</p>
+      </details>
+    `).join('') || '<p>No applications submitted yet.</p>';
+    return res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Admin</title><style>body{background:#111;color:#fff;font-family:system-ui;padding:2rem} details{border:1px solid #333;border-radius:10px;padding:12px;margin:12px 0} summary{cursor:pointer}</style></head><body><h1>Admin check</h1><p>Discord Username: <b>${esc(session.username)}</b></p><p>Discord ID: <code>${esc(session.id)}</code></p><p>Email: ${esc(session.email || 'Not authorized / unavailable')}</p><p>Verified Email: ${session.verified === true ? 'yes' : session.verified === false ? 'no' : 'unknown'}</p><p>IP Address: ${esc(session.ip || 'unknown')}</p><h2>Application Submissions</h2>${appList}<p>This page is owner-only. Do not share access to it.</p><a style="color:#a78bfa" href="/modapp">Back to application</a></body></html>`);
   }
 
   if (req.method === 'GET' && url.pathname === '/modapp') {
