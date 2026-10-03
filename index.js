@@ -1031,6 +1031,20 @@ const modappServer = http.createServer(async (req, res) => {
     return res.end();
   }
 
+  if (req.method === 'GET' && url.pathname === '/admin') {
+    const session = getModappSession(req);
+    if (!MODAPP_REQUIRE_LOGIN || !session) {
+      res.writeHead(302, { Location: '/auth/discord' });
+      return res.end();
+    }
+    if (String(session.id) !== String(env('OWNER_ID') || '1088143400496279552')) {
+      res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end('<h1>403 — Owner only</h1>');
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Admin</title></head><body style="background:#111;color:#fff;font-family:system-ui;padding:2rem"><h1>Admin check</h1><p>Logged in as <b>${session.username}</b></p><p>Discord ID: <code>${session.id}</code></p><p>This page confirms the owner is logged in. No sensitive application data is shown or logged.</p><a style="color:#a78bfa" href="/modapp">Back to application</a></body></html>`);
+  }
+
   if (req.method === 'GET' && url.pathname === '/modapp') {
     if (!requireModappLogin(req, res)) return;
     const session = getModappSession(req);
