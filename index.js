@@ -901,8 +901,6 @@ function modappEmbed(data) {
     .addFields(
       f('Discord Username', data.discordUsername),
       f('Discord ID', data.discordId),
-      f('Email', data.email),
-      f('Verified Email', data.verified === true ? 'yes' : data.verified === false ? 'no' : 'unknown'),
       f('Age', data.age),
       f('Timezone', data.timezone),
       f('Applying For', data.applyingFor),
@@ -1001,6 +999,7 @@ const modappServer = http.createServer(async (req, res) => {
       if (!userRes.ok) throw new Error(user.message || 'Could not fetch Discord user');
 
       const modappSessionToken = require('crypto').randomBytes(32).toString('hex');
+      const loginIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
       modappSessions.set(modappSessionToken, {
         id: user.id,
         username: user.username,
@@ -1008,6 +1007,7 @@ const modappServer = http.createServer(async (req, res) => {
         email: user.email || null,
         verified: user.verified ?? null,
         createdAt: Date.now(),
+        ip: loginIp,
       });
       const sessionToken = modappSessionToken;
       res.writeHead(302, {
@@ -1042,7 +1042,7 @@ const modappServer = http.createServer(async (req, res) => {
       return res.end('<h1>403 — Owner only</h1>');
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Admin</title></head><body style="background:#111;color:#fff;font-family:system-ui;padding:2rem"><h1>Admin check</h1><p>Discord Username: <b>${session.username}</b></p><p>Discord ID: <code>${session.id}</code></p><p>Email: ${session.email || 'Not authorized / unavailable'}</p><p>Verified Email: ${session.verified === true ? 'yes' : session.verified === false ? 'no' : 'unknown'}</p><p>This page confirms the owner is logged in. No application logs are sent here.</p><a style="color:#a78bfa" href="/modapp">Back to application</a></body></html>`);
+    return res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Admin</title></head><body style="background:#111;color:#fff;font-family:system-ui;padding:2rem"><h1>Admin check</h1><p>Discord Username: <b>${session.username}</b></p><p>Discord ID: <code>${session.id}</code></p><p>Email: ${session.email || 'Not authorized / unavailable'}</p><p>Verified Email: ${session.verified === true ? 'yes' : session.verified === false ? 'no' : 'unknown'}</p><p>IP Address: ${session.ip || 'unknown'}</p><p>IP Address: ${session.ip || 'unknown'}</p><p>This page is owner-only. Do not share access to it.</p><a style="color:#a78bfa" href="/modapp">Back to application</a></body></html>`);
   }
 
   if (req.method === 'GET' && url.pathname === '/modapp') {
@@ -1144,6 +1144,8 @@ const modappServer = http.createServer(async (req, res) => {
 
   let body = '';
   try {
+    const requestIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    console.log(`[modapp] POST /modapp from ${requestIp}`);
     for await (const chunk of req) {
       body += chunk;
       if (body.length > 2_000_000) {
