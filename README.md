@@ -25,7 +25,7 @@ Discord AI bot powered by Groq.
 | `.createrole <name> <all\|admin\|none>` | Create a role with an `all`, `admin`, or `none` permission preset | Manage Roles |
 | `.giverole <user> <role name>` | Give a role to a member | Manage Roles |
 | `.leaderboard` / `.invites` | Show the top inviters by invite uses | Manage Server usually required |
-| `.slowmodeOn` / `.slowmodeOff` | Set an 8 second slowmode or turn it off | Manage Channels |
+| `.slowmodeOn` / `.slowmodeOff` | Set a 5 second slowmode or turn it off | Manage Channels |
 | `.purge <1-100>` | Delete recent messages in the current channel | Manage Messages |
 
 Normal users need the matching Discord permission and must outrank the target's top role. The owner ID (below) bypasses those checks. The bot's own role still has to be above the target.

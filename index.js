@@ -502,7 +502,7 @@ function helpEmbed() {
         '`.createrole <role name> <perms>` — create a role with `all`, `admin`, or `none` permissions',
         '`.giverole <user> <role name>` — give a role to a user',
         '`.leaderboard` / `.invites` — show who has the most invites',
-        '`.slowmodeOn` / `.slowmodeOff` — set 8s slowmode or turn it off',
+        '`.slowmodeOn` / `.slowmodeOff` — set 5s slowmode or turn it off',
         '`.purge <1-100>` — delete recent messages in this channel',
         '',
         '**AI server builder**',
@@ -701,8 +701,8 @@ client.on(Events.MessageCreate, async (m) => {
 
       try {
         if (cmd === 'slowmodeon') {
-          await ch.setRateLimitPerUser(8, `${m.author.username}: .slowmodeOn`);
-          return m.reply({ content: '🐢 Slowmode is on: 8 seconds.', allowedMentions: NO_PINGS });
+          await ch.setRateLimitPerUser(5, `${m.author.username}: .slowmodeOn`);
+          return m.reply({ content: '🐢 Slowmode is on: 5 seconds.', allowedMentions: NO_PINGS });
         }
         await ch.setRateLimitPerUser(0, `${m.author.username}: .slowmodeOff`);
         return m.reply({ content: '🐇 Slowmode is off.', allowedMentions: NO_PINGS });
