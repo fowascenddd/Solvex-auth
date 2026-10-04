@@ -524,7 +524,7 @@ async function handleTicketOpen(i) {
     const embed = new EmbedBuilder()
       .setColor(0xec4899)
       .setTitle(`Ticket — ${member.user.username}`)
-      .setDescription(`Welcome <@${i.user.id}>! Staff will be here shortly.\n\n<@1555981671973781634> <@1555957115728826408> <@1555972937595617280>`)
+      .setDescription(`Welcome <@${i.user.id}>! Staff will be here shortly.\n\n<@&1555981671973781634> <@&1555957115728826408> <@&1555972937595617280>`)
       .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
@@ -567,21 +567,30 @@ async function handleTicketClose(i) {
     const messages = [...fetched.values()].reverse().map((m) => ({
       time: new Date(m.createdTimestamp).toISOString(),
       author: m.author ? m.author.username : 'Unknown',
-      content: m.content || (m.attachments.size ? '[attachment]' : '[embed]'),
+      avatar: m.author?.displayAvatarURL?.({ size: 64 }) || '',
+      content: m.content || '',
+      attachments: [...m.attachments.values()].map((a) => ({ url: a.url, name: a.name, contentType: a.contentType || '' })),
+      embeds: m.embeds.map((e) => ({ title: e.title, description: e.description, url: e.url })),
     }));
 
     const hash = require('crypto').createHash('sha256').update(channel.id).digest('hex').slice(0, 16);
     const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const attachmentHtml = (a) => {
+      const url = esc(a.url);
+      const name = esc(a.name || a.url);
+      if (/\.(png|jpe?g|gif|webp)$/i.test(a.name || a.url)) return `<img src="${url}" alt="${name}" style="max-width:100%;border-radius:8px;margin-top:8px">`;
+      if (/\.(mp4|webm|mov)$/i.test(a.name || a.url)) return `<video controls src="${url}" style="max-width:100%;border-radius:8px;margin-top:8px"></video>`;
+      if (/\.(mp3|wav|ogg|m4a)$/i.test(a.name || a.url)) return `<audio controls src="${url}" style="margin-top:8px"></audio>`;
+      return `<a href="${url}" target="_blank">${name}</a>`;
+    };
     const html = `<!doctype html>
 <html>
-<head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Ticket ${hash}</title><style>body{background:#0f0f16;color:#fff;font-family:system-ui;padding:2rem}.msg{border-left:3px solid #ec4899;padding:8px 12px;margin:12px 0;background:#171724;border-radius:8px}</style></head>
+<head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Ticket ${hash}</title><style>body{background:#0f0f16;color:#fff;font-family:system-ui;padding:2rem}.msg{display:flex;gap:12px;padding:12px 0;border-bottom:1px solid #2a2a3d}.avatar{width:40px;height:40px;border-radius:50%}.name{font-weight:800;color:#a78bfa}.time{color:#888;font-size:12px;margin-left:6px}.bubble{background:#171724;border:1px solid #2a2a3d;border-radius:12px;padding:10px 14px;margin-top:4px;max-width:70%}</style></head>
 <body>
 <h1>Ticket ${hash}</h1>
-<p>Owner: ${esc(meta.ownerId)}</p>
-<p>Closed by: ${esc(i.user.id)}</p>
-<p>Opened: ${esc(new Date(meta.openedAt).toISOString())}</p>
+<p>Owner: ${esc(meta.ownerId)}<br>Closed by: ${esc(i.user.id)}<br>Opened: ${esc(new Date(meta.openedAt).toISOString())}</p>
 <h2>Messages</h2>
-${messages.map((m) => `<div class="msg"><b>${esc(m.author)}</b> <small>${esc(m.time)}</small><p>${esc(m.content)}</p></div>`).join('') || '<p>No messages.</p>'}
+${messages.map((m) => `<div class="msg"><img class="avatar" src="${esc(m.avatar)}" alt=""><div><span class="name">${esc(m.author)}</span><span class="time">${esc(m.time)}</span><div class="bubble">${esc(m.content).replace(/\n/g, '<br>') || '<i>[no text]</i>'}${m.attachments.map(attachmentHtml).join('')}${m.embeds.map((e) => `<div style="margin-top:8px;border-left:3px solid #ec4899;padding-left:8px"><b>${esc(e.title || '')}</b><br>${esc(e.description || '')}</div>`).join('')}</div></div></div>`).join('') || '<p>No messages.</p>'}
 </body>
 </html>`;
 
@@ -933,8 +942,10 @@ client.on(Events.MessageCreate, async (m) => {
     if (m.guild && /^\.deleteticket\b/i.test(m.content.trim())) {
       const member = m.member || (await m.guild.members.fetch(m.author.id).catch(() => null));
       if (!member) return m.reply({ content: 'Could not read your server permissions.', allowedMentions: NO_PINGS });
-      const canManage = m.author.id === OWNER_ID || m.author.id === m.guild.ownerId || member.permissions.has(P.ManageChannels);
-      if (!canManage) return m.reply({ content: 'You need the Manage Channels permission to delete tickets.', allowedMentions: NO_PINGS });
+      const TICKET_DELETE_IDS = ['1555957115728826408', '1555972937595617280', '1555972804648898650'];
+      if (!TICKET_DELETE_IDS.includes(m.author.id)) {
+        return m.reply({ content: 'Only these IDs can use `.deleteticket`.', allowedMentions: NO_PINGS });
+      }
 
       let channel = null;
       const arg = m.content.trim().split(/\s+/)[1];
@@ -1159,6 +1170,73 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   } catch (e) {
     console.error('[modlog role error]', scrub(e?.message ?? e));
   }
+});
+
+client.on(Events.GuildRoleCreate, async (role) => {
+  try {
+    const embed = new EmbedBuilder()
+      .setColor(0x22c55e)
+      .setTitle('➕ Role Created')
+      .addFields({ name: 'Role', value: `${role.name} (${role.id})`.slice(0, 1024) })
+      .setTimestamp();
+    await sendModLog(role.guild, embed);
+  } catch (e) { console.error('[modlog role create]', scrub(e?.message ?? e)); }
+});
+
+client.on(Events.GuildRoleDelete, async (role) => {
+  try {
+    const embed = new EmbedBuilder()
+      .setColor(0xef4444)
+      .setTitle('➖ Role Deleted')
+      .addFields({ name: 'Role', value: `${role.name} (${role.id})`.slice(0, 1024) })
+      .setTimestamp();
+    await sendModLog(role.guild, embed);
+  } catch (e) { console.error('[modlog role delete]', scrub(e?.message ?? e)); }
+});
+
+client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
+  try {
+    const changes = [];
+    if (oldRole.name !== newRole.name) changes.push(`Name: ${oldRole.name} → ${newRole.name}`);
+    if (oldRole.color !== newRole.color) changes.push(`Color: ${oldRole.color.toString(16)} → ${newRole.color.toString(16)}`);
+    if (oldRole.hoist !== newRole.hoist) changes.push(`Hoisted: ${oldRole.hoist} → ${newRole.hoist}`);
+    if (oldRole.mentionable !== newRole.mentionable) changes.push(`Mentionable: ${oldRole.mentionable} → ${newRole.mentionable}`);
+    const oldPerms = new Set(oldRole.permissions.toArray());
+    const newPerms = new Set(newRole.permissions.toArray());
+    const addedPerms = [...newPerms].filter((p) => !oldPerms.has(p));
+    const removedPerms = [...oldPerms].filter((p) => !newPerms.has(p));
+    if (addedPerms.length) changes.push(`Added perms: ${addedPerms.join(', ')}`);
+    if (removedPerms.length) changes.push(`Removed perms: ${removedPerms.join(', ')}`);
+    if (!changes.length) return;
+
+    const embed = new EmbedBuilder()
+      .setColor(0xf59e0b)
+      .setTitle('✏️ Role Updated')
+      .addFields(
+        { name: 'Role', value: `${newRole.name} (${newRole.id})`.slice(0, 1024), inline: true },
+        { name: 'Changes', value: changes.join('\n').slice(0, 1024) },
+      )
+      .setTimestamp();
+    await sendModLog(newRole.guild, embed);
+  } catch (e) { console.error('[modlog role update]', scrub(e?.message ?? e)); }
+});
+
+client.on(Events.MessageUpdate, async (oldMsg, newMsg) => {
+  try {
+    if (!newMsg.guild || newMsg.author?.bot) return;
+    if (oldMsg.content === newMsg.content) return;
+    const embed = new EmbedBuilder()
+      .setColor(0x3b82f6)
+      .setTitle('✏️ Message Edited')
+      .addFields(
+        { name: 'Author', value: newMsg.author ? `${newMsg.author.username} (${newMsg.author.id})`.slice(0, 1024) : 'Unknown', inline: true },
+        { name: 'Channel', value: `<#${newMsg.channelId}>`, inline: true },
+        { name: 'Before', value: (oldMsg.content || '(no cached content)').slice(0, 1024) },
+        { name: 'After', value: (newMsg.content || '(no content)').slice(0, 1024) },
+      )
+      .setTimestamp();
+    await sendModLog(newMsg.guild, embed);
+  } catch (e) { console.error('[modlog message edit]', scrub(e?.message ?? e)); }
 });
 
 client.on(Events.ChannelCreate, async (channel) => {

@@ -30,7 +30,7 @@ Discord AI bot powered by Groq.
 | `.verifypanel` | Send the verification panel to the verification channel | Owner only |
 | `.forceverify @user` / `.unverify @user` | Force verify or remove verification | Owner only |
 | `.ticketpanel` | Send a ticket panel; tickets are private to the opener + support IDs | Manage Channels |
-| `.deleteticket` / `.deleteticket #channel` | Delete a ticket channel | Manage Channels |
+| `.deleteticket` / `.deleteticket #channel` | Delete a ticket channel | Only `1555957115728826408`, `1555972937595617280`, `1555972804648898650` |
 
 Normal users need the matching Discord permission and must outrank the target's top role. The owner ID (below) bypasses those checks. The bot's own role still has to be above the target.
 
