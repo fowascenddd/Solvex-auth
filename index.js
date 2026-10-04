@@ -51,6 +51,7 @@ const VERIFY_ROLE_ID = env('VERIFY_ROLE_ID') || '1556025670608625774';
 const FOWA_PAGE = '/fowa';
 const TICKET_SUPPORT_IDS = ['1555972937595617280', '1555957115728826408', '1555981671973781634'];
 const openTickets = new Map();
+const ticketMeta = new Map();
 const DISCORD_CLIENT_ID = env('DISCORD_CLIENT_ID');
 const DISCORD_CLIENT_SECRET = env('DISCORD_CLIENT_SECRET');
 const OAUTH_REDIRECT_URI = env('OAUTH_REDIRECT_URI') || 'https://sinfultpai.up.railway.app/auth/discord/callback';
@@ -69,6 +70,9 @@ const verifications = new Map(Object.entries(loadJson(VERIFICATIONS_FILE, {})));
 const saveVerifications = () => { try { fs.writeFileSync(VERIFICATIONS_FILE, JSON.stringify(Object.fromEntries(verifications), null, 2)); } catch (_) {} };
 const saveModappSessions = () => { try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Object.fromEntries(modappSessions), null, 2)); } catch (_) {} };
 const saveModappSubmissions = () => { try { fs.writeFileSync(SUBMISSIONS_FILE, JSON.stringify(modappSubmissions.slice(0, 100), null, 2)); } catch (_) {} };
+const TICKET_SUMMARIES_FILE = path.join(DATA_DIR, 'ticket_summaries.json');
+const closedTickets = new Map(Object.entries(loadJson(TICKET_SUMMARIES_FILE, {})));
+const saveClosedTickets = () => { try { fs.writeFileSync(TICKET_SUMMARIES_FILE, JSON.stringify(Object.fromEntries(closedTickets), null, 2)); } catch (_) {} };
 
 if (!DISCORD_TOKEN || !GROQ_API_KEY) {
   console.error('Missing DISCORD_BOT_TOKEN or GROQ_API_KEY.');
@@ -515,10 +519,89 @@ async function handleTicketOpen(i) {
     }
 
     openTickets.set(i.user.id, channel.id);
-    await channel.send({ content: `<@${i.user.id}> Your ticket is ready. Support will be with you soon.`, allowedMentions: NO_PINGS });
+    ticketMeta.set(channel.id, { ownerId: i.user.id, openedAt: Date.now() });
+
+    const embed = new EmbedBuilder()
+      .setColor(0xec4899)
+      .setTitle(`Ticket — ${member.user.username}`)
+      .setDescription(`Welcome <@${i.user.id}>! Staff will be here shortly.\n\n<@1555981671973781634> <@1555957115728826408> <@1555972937595617280>`)
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('ticket_claim').setLabel('Claim Ticket').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('ticket_close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger),
+    );
+
+    await channel.send({ embeds: [embed], components: [row], allowedMentions: NO_PINGS });
     await i.reply({ content: `Ticket created: <#${channel.id}>`, ...EPHEMERAL });
   } catch (e) {
     await i.reply({ content: `Could not create ticket: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, ...EPHEMERAL }).catch(() => {});
+  }
+}
+
+async function handleTicketClaim(i) {
+  try {
+    const meta = ticketMeta.get(i.channelId);
+    if (!meta) return i.reply({ content: 'That is not a ticket channel.', ...EPHEMERAL });
+    if (meta.claimedBy && meta.claimedBy !== i.user.id) return i.reply({ content: `Already claimed by <@${meta.claimedBy}>.`, ...EPHEMERAL });
+    meta.claimedBy = i.user.id;
+    ticketMeta.set(i.channelId, meta);
+    await i.reply({ content: `You have claimed this ticket. Please <@${meta.ownerId}>.`, allowedMentions: NO_PINGS });
+  } catch (e) {
+    await i.reply({ content: `Could not claim ticket: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, ...EPHEMERAL }).catch(() => {});
+  }
+}
+
+async function handleTicketClose(i) {
+  try {
+    const channel = i.channel;
+    const meta = ticketMeta.get(channel.id);
+    if (!meta) return i.reply({ content: 'That is not a ticket channel.', ...EPHEMERAL });
+
+    const isSupport = TICKET_SUPPORT_IDS.includes(i.user.id) || (i.member?.permissions?.has(P.ManageChannels) ?? false) || i.user.id === OWNER_ID;
+    if (i.user.id !== meta.ownerId && !isSupport) {
+      return i.reply({ content: 'Only the ticket owner or support can close this.', ...EPHEMERAL });
+    }
+
+    const fetched = await channel.messages.fetch({ limit: 100 }).catch(() => new Map());
+    const messages = [...fetched.values()].reverse().map((m) => ({
+      time: new Date(m.createdTimestamp).toISOString(),
+      author: m.author ? m.author.username : 'Unknown',
+      content: m.content || (m.attachments.size ? '[attachment]' : '[embed]'),
+    }));
+
+    const hash = require('crypto').createHash('sha256').update(channel.id).digest('hex').slice(0, 16);
+    const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const html = `<!doctype html>
+<html>
+<head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Ticket ${hash}</title><style>body{background:#0f0f16;color:#fff;font-family:system-ui;padding:2rem}.msg{border-left:3px solid #ec4899;padding:8px 12px;margin:12px 0;background:#171724;border-radius:8px}</style></head>
+<body>
+<h1>Ticket ${hash}</h1>
+<p>Owner: ${esc(meta.ownerId)}</p>
+<p>Closed by: ${esc(i.user.id)}</p>
+<p>Opened: ${esc(new Date(meta.openedAt).toISOString())}</p>
+<h2>Messages</h2>
+${messages.map((m) => `<div class="msg"><b>${esc(m.author)}</b> <small>${esc(m.time)}</small><p>${esc(m.content)}</p></div>`).join('') || '<p>No messages.</p>'}
+</body>
+</html>`;
+
+    closedTickets.set(hash, {
+      time: new Date().toISOString(),
+      ownerId: meta.ownerId,
+      closedBy: i.user.id,
+      messages,
+      html,
+    });
+    saveClosedTickets();
+
+    await i.reply({ content: `Ticket closed. Summary: https://sinfultpai.up.railway.app/ticket-${hash}`, allowedMentions: NO_PINGS });
+
+    openTickets.delete(meta.ownerId);
+    ticketMeta.delete(channel.id);
+
+    setTimeout(() => channel.delete(`Ticket closed by ${i.user.username}`).catch(() => {}), 5000);
+  } catch (e) {
+    await i.reply({ content: `Could not close ticket: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, ...EPHEMERAL }).catch(() => {});
   }
 }
 
@@ -531,6 +614,14 @@ client.on(Events.InteractionCreate, async (i) => {
       }
       if (i.customId === 'ticket_open') {
         await handleTicketOpen(i);
+        return;
+      }
+      if (i.customId === 'ticket_claim') {
+        await handleTicketClaim(i);
+        return;
+      }
+      if (i.customId === 'ticket_close') {
+        await handleTicketClose(i);
         return;
       }
       await builder.handleButton(i);
@@ -581,6 +672,7 @@ function helpEmbed() {
         '`.verifypanel` — send the verification panel (owner only)',
         '`.forceverify @user` / `.unverify @user` — manage verification (owner only)',
         '`.ticketpanel` — send a ticket panel for help/support',
+        '`.deleteticket` / `.deleteticket #channel` — delete a ticket channel',
         '',
         '**AI server builder**',
         '`?build <what you want>` or `/build` — I make a plan, you press Run it',
@@ -835,6 +927,37 @@ client.on(Events.MessageCreate, async (m) => {
       verifications.delete(id);
       saveVerifications();
       return m.reply({ content: `Removed verification from **${member.user.username}**.`, allowedMentions: NO_PINGS });
+    }
+
+    // ── .deleteticket ──
+    if (m.guild && /^\.deleteticket\b/i.test(m.content.trim())) {
+      const member = m.member || (await m.guild.members.fetch(m.author.id).catch(() => null));
+      if (!member) return m.reply({ content: 'Could not read your server permissions.', allowedMentions: NO_PINGS });
+      const canManage = m.author.id === OWNER_ID || m.author.id === m.guild.ownerId || member.permissions.has(P.ManageChannels);
+      if (!canManage) return m.reply({ content: 'You need the Manage Channels permission to delete tickets.', allowedMentions: NO_PINGS });
+
+      let channel = null;
+      const arg = m.content.trim().split(/\s+/)[1];
+      if (arg) {
+        const id = arg.replace(/[<#>]/g, '');
+        channel = m.guild.channels.cache.get(id) || null;
+      } else if (m.channel?.name?.startsWith('ticket-')) {
+        channel = m.channel;
+      }
+
+      if (!channel || !channel.name.startsWith('ticket-')) {
+        return m.reply({ content: 'Run this inside a ticket channel, or use `.deleteticket #channel`.', allowedMentions: NO_PINGS });
+      }
+
+      try {
+        await channel.delete(`Ticket deleted by ${m.author.username}`);
+        const meta = ticketMeta.get(channel.id);
+        if (meta) openTickets.delete(meta.ownerId);
+        ticketMeta.delete(channel.id);
+        return;
+      } catch (e) {
+        return m.reply({ content: `Could not delete ticket: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, allowedMentions: NO_PINGS });
+      }
     }
 
     // ── .ticketpanel ──
@@ -1236,6 +1359,17 @@ const modappServer = http.createServer(async (req, res) => {
       'Set-Cookie': 'modapp_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0',
     });
     return res.end();
+  }
+
+  if (req.method === 'GET' && url.pathname.startsWith('/ticket-')) {
+    const hash = url.pathname.slice('/ticket-'.length);
+    const ticket = closedTickets.get(hash);
+    if (!ticket) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Ticket not found');
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(ticket.html);
   }
 
   if (req.method === 'GET' && url.pathname === '/verify') {
