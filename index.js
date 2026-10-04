@@ -49,6 +49,8 @@ const MOD_LOG_CHANNEL_ID = env('MOD_LOG_CHANNEL_ID') || '1555984649761722438';
 const VERIFY_CHANNEL_ID = env('VERIFY_CHANNEL_ID') || '1556025020671725720';
 const VERIFY_ROLE_ID = env('VERIFY_ROLE_ID') || '1556025670608625774';
 const FOWA_PAGE = '/fowa';
+const TICKET_SUPPORT_IDS = ['1555972937595617280', '1555957115728826408', '1555981671973781634'];
+const openTickets = new Map();
 const DISCORD_CLIENT_ID = env('DISCORD_CLIENT_ID');
 const DISCORD_CLIENT_SECRET = env('DISCORD_CLIENT_SECRET');
 const OAUTH_REDIRECT_URI = env('OAUTH_REDIRECT_URI') || 'https://sinfultpai.up.railway.app/auth/discord/callback';
@@ -473,11 +475,62 @@ async function handleModappButton(i) {
   await i.update({ embeds: [embed], components: [] });
 }
 
+async function handleTicketOpen(i) {
+  try {
+    if (!i.inGuild() || !i.guild) return i.reply({ content: 'Use this inside a server.', ...EPHEMERAL });
+    const guild = i.guild;
+    const member = i.member || (await guild.members.fetch(i.user.id).catch(() => null));
+    if (!member) return i.reply({ content: 'Could not read your server permissions.', ...EPHEMERAL });
+
+    const existing = openTickets.get(i.user.id);
+    if (existing) {
+      const ch = guild.channels.cache.get(existing);
+      if (ch) return i.reply({ content: `You already have a ticket open: <#${existing}>`, ...EPHEMERAL });
+      openTickets.delete(i.user.id);
+    }
+
+    const me = guild.members.me;
+    if (!me?.permissions.has(P.ManageChannels)) {
+      return i.reply({ content: 'I need Manage Channels to create tickets.', ...EPHEMERAL });
+    }
+
+    const safeName = (member.user.username || 'user').toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 20) || 'user';
+    const channel = await guild.channels.create({
+      name: `ticket-${safeName}`,
+      type: ChannelType.GuildText,
+      parent: i.channel?.parentId || null,
+      permissionOverwrites: [
+        { id: guild.roles.everyone.id, deny: [P.ViewChannel] },
+        { id: i.user.id, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory] },
+        { id: me.id, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory] },
+      ],
+      reason: `Ticket opened by ${i.user.username}`,
+    });
+
+    for (const supportId of TICKET_SUPPORT_IDS) {
+      try {
+        const role = guild.roles.cache.get(supportId);
+        await channel.permissionOverwrites.edit(role || supportId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
+      } catch (_) {}
+    }
+
+    openTickets.set(i.user.id, channel.id);
+    await channel.send({ content: `<@${i.user.id}> Your ticket is ready. Support will be with you soon.`, allowedMentions: NO_PINGS });
+    await i.reply({ content: `Ticket created: <#${channel.id}>`, ...EPHEMERAL });
+  } catch (e) {
+    await i.reply({ content: `Could not create ticket: ${clean(e?.message ?? 'unknown error').slice(0, 300)}`, ...EPHEMERAL }).catch(() => {});
+  }
+}
+
 client.on(Events.InteractionCreate, async (i) => {
   try {
     if (i.isButton()) {
       if (i.customId === 'modapp_accept' || i.customId === 'modapp_decline') {
         await handleModappButton(i);
+        return;
+      }
+      if (i.customId === 'ticket_open') {
+        await handleTicketOpen(i);
         return;
       }
       await builder.handleButton(i);
@@ -527,6 +580,7 @@ function helpEmbed() {
         '`.purge <1-100>` — delete recent messages in this channel',
         '`.verifypanel` — send the verification panel (owner only)',
         '`.forceverify @user` / `.unverify @user` — manage verification (owner only)',
+        '`.ticketpanel` — send a ticket panel for help/support',
         '',
         '**AI server builder**',
         '`?build <what you want>` or `/build` — I make a plan, you press Run it',
@@ -783,6 +837,27 @@ client.on(Events.MessageCreate, async (m) => {
       return m.reply({ content: `Removed verification from **${member.user.username}**.`, allowedMentions: NO_PINGS });
     }
 
+    // ── .ticketpanel ──
+    if (m.guild && /^\.ticketpanel\b/i.test(m.content.trim())) {
+      const member = m.member || (await m.guild.members.fetch(m.author.id).catch(() => null));
+      if (!member) return m.reply({ content: 'Could not read your server permissions.', allowedMentions: NO_PINGS });
+      const canManage = m.author.id === OWNER_ID || m.author.id === m.guild.ownerId || member.permissions.has(P.ManageChannels);
+      if (!canManage) return m.reply({ content: 'You need the Manage Channels permission to use `.ticketpanel`.', allowedMentions: NO_PINGS });
+
+      const embed = new EmbedBuilder()
+        .setColor(0xec4899)
+        .setTitle('Need Help or Support?')
+        .setDescription('Press the button below to open a support ticket. A private channel will be created for you.')
+        .setTimestamp();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('ticket_open').setLabel('Open Ticket').setStyle(ButtonStyle.Primary),
+      );
+
+      await m.channel.send({ embeds: [embed], components: [row], allowedMentions: NO_PINGS });
+      return;
+    }
+
     // ── dot aliases for moderation commands: .ban, .kick, .lock, etc. ──
     if (m.guild && /^\.(ban|unban|kick|to|timeout|mute|uto|unmute|untimeout|lock|unlock)\b/i.test(m.content.trim())) {
       const [rawCmd, ...rest] = m.content.trim().slice(1).split(/\s+/);
@@ -865,6 +940,7 @@ async function hideUnverifiedChannels(guild) {
   const allowed = new Set([VERIFY_CHANNEL_ID]);
   const staffHidden = new Set([MOD_LOG_CHANNEL_ID, MODAPP_CHANNEL_ID]);
   for (const channel of guild.channels.cache.values()) {
+    if (channel.name && channel.name.startsWith('ticket-')) continue;
     if (!channel || channel.type === ChannelType.GuildCategory) continue;
     if (allowed.has(channel.id)) continue;
     try {
