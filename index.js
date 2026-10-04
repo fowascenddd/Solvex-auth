@@ -261,6 +261,12 @@ const commands = [
   new SlashCommandBuilder()
     .setName('modapp')
     .setDescription('Get the link to the SinfulTpAi staff application form'),
+
+  new SlashCommandBuilder()
+    .setName('talk')
+    .setDescription('Make the bot say something in this channel (owner only)')
+    .addStringOption((o) => o.setName('text').setDescription('What the bot should say').setRequired(true).setMaxLength(4000))
+    .addAttachmentOption((o) => o.setName('file').setDescription('Optional file or image')),
 ];
 
 // ── command handler ───────────────────────────────────────────────────────────
@@ -283,6 +289,18 @@ async function handle(i) {
       return i.reply({ content: 'Set `MODAPP_URL` in the bot environment to your staff application form URL.', ...EPHEMERAL });
     }
     return i.reply({ content: `Apply for SinfulTpAi staff here: ${MODAPP_URL}` });
+  }
+
+  // ── /talk ─────────────────────────────────────────────────────────────────
+  if (name === 'talk') {
+    if (i.user.id !== OWNER_ID) return i.reply({ content: 'Only you can use that.', ...EPHEMERAL });
+    const text = i.options.getString('text', true);
+    const file = i.options.getAttachment('file');
+    await i.reply({ content: 'Sent.', ...EPHEMERAL }).catch(() => {});
+    if (file) {
+      return i.channel.send({ content: text, files: [file.url], allowedMentions: NO_PINGS });
+    }
+    return i.channel.send({ content: text, allowedMentions: NO_PINGS });
   }
 
   // ── /build ──────────────────────────────────────────────────────────────────
