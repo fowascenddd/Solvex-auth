@@ -47,7 +47,7 @@ const MODAPP_PORT       = Number(env('MODAPP_PORT') || env('PORT') || 8080);
 const MODAPP_STAFF_ROLE_ID = env('MODAPP_STAFF_ROLE_ID');
 const MOD_LOG_CHANNEL_ID = env('MOD_LOG_CHANNEL_ID') || '1555984649761722438';
 const VERIFY_CHANNEL_ID = env('VERIFY_CHANNEL_ID') || '1556025020671725720';
-const VERIFY_ROLE_ID = env('VERIFY_ROLE_ID') || '1555925670608625774';
+const VERIFY_ROLE_ID = env('VERIFY_ROLE_ID') || '1556025670608625774';
 const FOWA_PAGE = '/fowa';
 const DISCORD_CLIENT_ID = env('DISCORD_CLIENT_ID');
 const DISCORD_CLIENT_SECRET = env('DISCORD_CLIENT_SECRET');
@@ -753,7 +753,8 @@ client.on(Events.MessageCreate, async (m) => {
           .setDescription('Click the button below to verify and unlock the server.')
           .setTimestamp();
         await channel.send({ embeds: [embed], components: [row], allowedMentions: NO_PINGS });
-        return m.reply({ content: 'Verification panel sent.', allowedMentions: NO_PINGS });
+        await hideUnverifiedChannels(m.guild).catch(() => {});
+        return m.reply({ content: 'Verification panel sent and channel permissions updated.', allowedMentions: NO_PINGS });
       }
 
       const id = parseTarget(m.content.trim().split(/\s+/)[1] || '');
@@ -1186,12 +1187,11 @@ const modappServer = http.createServer(async (req, res) => {
           return res.end(JSON.stringify({ error: 'Payload too large' }));
         }
       }
-      const data = JSON.parse(body || '{}');
-      const age = String(data.age || '').trim();
-      if (!age) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'Age is required.' }));
+      let data = {};
+      try { data = JSON.parse(body || '{}'); } catch (_) {
+        data = Object.fromEntries(new URLSearchParams(body));
       }
+      const age = String(data.age || '').trim() || 'not provided';
       const record = {
         discordUsername: session.username,
         discordId: session.id,
