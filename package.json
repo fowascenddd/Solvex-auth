@@ -1,0 +1,19 @@
+{
+  "name": "sinfultp-ai",
+  "version": "1.1.0",
+  "description": "sinfultp ai - Discord AI + moderation bot powered by Groq",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "@discordjs/voice": "^0.17.0",
+    "@distube/ytdl-core": "^4.14.4",
+    "ffmpeg-static": "^5.2.0"
+  }
+}
