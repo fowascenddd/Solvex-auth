@@ -27,6 +27,8 @@ Discord AI bot powered by Groq.
 | `.leaderboard` / `.invites` | Show the top inviters by invite uses | Manage Server usually required |
 | `.slowmodeOn` / `.slowmodeOff` | Set a 5 second slowmode or turn it off | Manage Channels |
 | `.purge <1-100>` | Delete recent messages in the current channel | Manage Messages |
+| `.verifypanel` | Send the verification panel to the verification channel | Owner only |
+| `.forceverify @user` / `.unverify @user` | Force verify or remove verification | Owner only |
 
 Normal users need the matching Discord permission and must outrank the target's top role. The owner ID (below) bypasses those checks. The bot's own role still has to be above the target.
 
@@ -44,6 +46,12 @@ Normal users need the matching Discord permission and must outrank the target's 
 ## Moderation logs
 - Deleted messages are logged to `MOD_LOG_CHANNEL_ID` (default `1555984649761722438`).
 - Role adds/removes are logged to the same channel.
+
+## Verification
+- `.verifypanel` sends a verification button to `VERIFY_CHANNEL_ID`.
+- `.forceverify @user` and `.unverify @user` are owner-only.
+- `/verify` is the web verification page.
+- `/fowa` is the owner-only verified users page.
 
 ## Safety
 - The bot never pings @everyone, @here, @verified, or any role (mentions are disabled and also defused in text).

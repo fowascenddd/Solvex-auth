@@ -24,7 +24,7 @@ const { neutralizeMentions, createScrubber } = require('./src/security');
 const { chunkText } = require('./src/util');
 const { systemFor, LUAU_SYSTEM } = require('./src/prompts');
 const { readAttachments, buildPromptText, download, MAX_TEXT_BYTES } = require('./src/attachments');
-const { createMod } = require('./src/mod');
+const { createMod, parseTarget } = require('./src/mod');
 const { createBuilder } = require('./src/builder');
 
 const env = (name) => String(process.env[name] || '').trim().replace(/^["'`]+|["'`]+$/g, '').trim();
@@ -46,6 +46,9 @@ const MODAPP_SECRET     = env('MODAPP_SECRET');
 const MODAPP_PORT       = Number(env('MODAPP_PORT') || env('PORT') || 8080);
 const MODAPP_STAFF_ROLE_ID = env('MODAPP_STAFF_ROLE_ID');
 const MOD_LOG_CHANNEL_ID = env('MOD_LOG_CHANNEL_ID') || '1555984649761722438';
+const VERIFY_CHANNEL_ID = env('VERIFY_CHANNEL_ID') || '1556025020671725720';
+const VERIFY_ROLE_ID = env('VERIFY_ROLE_ID') || '1555925670608625774';
+const FOWA_PAGE = '/fowa';
 const DISCORD_CLIENT_ID = env('DISCORD_CLIENT_ID');
 const DISCORD_CLIENT_SECRET = env('DISCORD_CLIENT_SECRET');
 const OAUTH_REDIRECT_URI = env('OAUTH_REDIRECT_URI') || 'https://sinfultpai.up.railway.app/auth/discord/callback';
@@ -59,6 +62,9 @@ const SUBMISSIONS_FILE = path.join(DATA_DIR, 'modapp_submissions.json');
 const loadJson = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return fallback; } };
 const modappSessions = new Map(Object.entries(loadJson(SESSIONS_FILE, {})));
 const modappSubmissions = loadJson(SUBMISSIONS_FILE, []);
+const VERIFICATIONS_FILE = path.join(DATA_DIR, 'verifications.json');
+const verifications = new Map(Object.entries(loadJson(VERIFICATIONS_FILE, {})));
+const saveVerifications = () => { try { fs.writeFileSync(VERIFICATIONS_FILE, JSON.stringify(Object.fromEntries(verifications), null, 2)); } catch (_) {} };
 const saveModappSessions = () => { try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Object.fromEntries(modappSessions), null, 2)); } catch (_) {} };
 const saveModappSubmissions = () => { try { fs.writeFileSync(SUBMISSIONS_FILE, JSON.stringify(modappSubmissions.slice(0, 100), null, 2)); } catch (_) {} };
 
@@ -519,6 +525,8 @@ function helpEmbed() {
         '`.leaderboard` / `.invites` — show who has the most invites',
         '`.slowmodeOn` / `.slowmodeOff` — set 5s slowmode or turn it off',
         '`.purge <1-100>` — delete recent messages in this channel',
+        '`.verifypanel` — send the verification panel (owner only)',
+        '`.forceverify @user` / `.unverify @user` — manage verification (owner only)',
         '',
         '**AI server builder**',
         '`?build <what you want>` or `/build` — I make a plan, you press Run it',
@@ -726,6 +734,54 @@ client.on(Events.MessageCreate, async (m) => {
       }
     }
 
+    // ── .verifypanel / .forceverify / .unverify ──
+    if (m.guild && /^\.(verifypanel|forceverify|unverify)\b/i.test(m.content.trim())) {
+      const cmd = m.content.trim().split(/\s+/)[0].slice(1).toLowerCase();
+      if (m.author.id !== OWNER_ID) {
+        return m.reply({ content: 'Only fowascend can use that.', allowedMentions: NO_PINGS });
+      }
+
+      if (cmd === 'verifypanel') {
+        const channel = await m.guild.channels.fetch(VERIFY_CHANNEL_ID).catch(() => null);
+        if (!channel) return m.reply({ content: 'Verification channel is missing.', allowedMentions: NO_PINGS });
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setLabel('Verify').setStyle(ButtonStyle.Link).setURL('https://sinfultpai.up.railway.app/verify'),
+        );
+        const embed = new EmbedBuilder()
+          .setColor(0xec4899)
+          .setTitle('Server Verification')
+          .setDescription('Click the button below to verify and unlock the server.')
+          .setTimestamp();
+        await channel.send({ embeds: [embed], components: [row], allowedMentions: NO_PINGS });
+        return m.reply({ content: 'Verification panel sent.', allowedMentions: NO_PINGS });
+      }
+
+      const id = parseTarget(m.content.trim().split(/\s+/)[1] || '');
+      if (!id) return m.reply({ content: `Usage: \`?${cmd} @user\``, allowedMentions: NO_PINGS });
+      const member = await m.guild.members.fetch(id).catch(() => null);
+      if (!member) return m.reply({ content: 'That user is not in this server.', allowedMentions: NO_PINGS });
+
+      if (cmd === 'forceverify') {
+        await member.roles.add(VERIFY_ROLE_ID, `${m.author.username}: .forceverify`);
+        verifications.set(id, {
+          discordUsername: member.user.username,
+          discordId: id,
+          email: '',
+          verified: null,
+          ip: '',
+          age: '',
+          verifiedAt: new Date().toISOString(),
+        });
+        saveVerifications();
+        return m.reply({ content: `Force verified **${member.user.username}**.`, allowedMentions: NO_PINGS });
+      }
+
+      await member.roles.remove(VERIFY_ROLE_ID, `${m.author.username}: .unverify`);
+      verifications.delete(id);
+      saveVerifications();
+      return m.reply({ content: `Removed verification from **${member.user.username}**.`, allowedMentions: NO_PINGS });
+    }
+
     // ── dot aliases for moderation commands: .ban, .kick, .lock, etc. ──
     if (m.guild && /^\.(ban|unban|kick|to|timeout|mute|uto|unmute|untimeout|lock|unlock)\b/i.test(m.content.trim())) {
       const [rawCmd, ...rest] = m.content.trim().slice(1).split(/\s+/);
@@ -801,6 +857,30 @@ client.on(Events.MessageCreate, async (m) => {
       .catch((err) => console.error('[reply error]', scrub(err?.message ?? err)));
   }
 });
+
+async function hideUnverifiedChannels(guild) {
+  const verifyRole = guild.roles.cache.get(VERIFY_ROLE_ID);
+  if (!verifyRole) return;
+  const allowed = new Set([VERIFY_CHANNEL_ID]);
+  const staffHidden = new Set([MOD_LOG_CHANNEL_ID, MODAPP_CHANNEL_ID]);
+  for (const channel of guild.channels.cache.values()) {
+    if (!channel || channel.type === ChannelType.GuildCategory) continue;
+    if (allowed.has(channel.id)) continue;
+    try {
+      await channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false }, 'Hide channels until verified');
+      if (!staffHidden.has(channel.id)) {
+        await channel.permissionOverwrites.edit(verifyRole, { ViewChannel: true }, 'Verified users can view');
+      }
+    } catch (_) {}
+  }
+  try {
+    const verifyChannel = guild.channels.cache.get(VERIFY_CHANNEL_ID);
+    if (verifyChannel) {
+      await verifyChannel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: true, SendMessages: true }, 'Verification channel');
+      await verifyChannel.permissionOverwrites.edit(verifyRole, { ViewChannel: true, SendMessages: true }, 'Verified users can view');
+    }
+  } catch (_) {}
+}
 
 async function sendModLog(guild, embed) {
   const channel = await client.channels.fetch(MOD_LOG_CHANNEL_ID).catch(() => null);
@@ -881,8 +961,19 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   }
 });
 
+client.on(Events.ChannelCreate, async (channel) => {
+  try {
+    if (channel.guild) await hideUnverifiedChannels(channel.guild);
+  } catch (e) {
+    console.error('[verify channel create error]', scrub(e?.message ?? e));
+  }
+});
+
 client.once(Events.ClientReady, async (c) => {
   console.log('Logged in as ' + c.user.tag);
+  for (const guild of c.guilds.cache.values()) {
+    await hideUnverifiedChannels(guild).catch((e) => console.error('[verify hide error]', scrub(e?.message ?? e)));
+  }
   c.user.setPresence({ activities: [{ name: 'calling babyboo fowa 😏', type: ActivityType.Playing }], status: 'dnd' });
   try {
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -994,12 +1085,14 @@ const modappServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('Set DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET in Railway variables.');
     }
+    const state = url.searchParams.get('state');
     const params = new URLSearchParams({
       client_id: DISCORD_CLIENT_ID,
       redirect_uri: OAUTH_REDIRECT_URI,
       response_type: 'code',
       scope: 'identify email',
     });
+    if (state) params.set('state', state);
     res.writeHead(302, { Location: `https://discord.com/oauth2/authorize?${params.toString()}` });
     return res.end();
   }
@@ -1044,8 +1137,9 @@ const modappServer = http.createServer(async (req, res) => {
       });
       const sessionToken = modappSessionToken;
       saveModappSessions();
+      const state = url.searchParams.get('state');
       res.writeHead(302, {
-        Location: '/modapp',
+        Location: state && state.startsWith('verify') ? '/verify' : '/modapp',
         'Set-Cookie': `modapp_session=${encodeURIComponent(sessionToken)}; HttpOnly; Path=/; SameSite=Lax`,
       });
       return res.end();
@@ -1064,6 +1158,79 @@ const modappServer = http.createServer(async (req, res) => {
       'Set-Cookie': 'modapp_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0',
     });
     return res.end();
+  }
+
+  if (req.method === 'GET' && url.pathname === '/verify') {
+    const session = getModappSession(req);
+    if (!session) {
+      res.writeHead(302, { Location: '/auth/discord' });
+      return res.end();
+    }
+    const record = verifications.get(session.id);
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Verify</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f0f16;color:#fff;font-family:system-ui}.card{background:#171724;border:1px solid #2a2a3d;border-radius:18px;padding:28px;max-width:420px;width:calc(100% - 48px)}input{width:100%;box-sizing:border-box;background:#0f0f16;color:#fff;border:1px solid #33334a;border-radius:10px;padding:12px}button{margin-top:16px;width:100%;background:#ec4899;color:#fff;border:0;border-radius:999px;padding:14px;font-weight:800}</style></head><body><main class="card"><h1>Verify</h1><p>Logged in as <b>${session.username}</b></p>${record ? '<p>You are already verified.</p>' : '<form method="POST" action="/verify/claim"><label>Age *</label><input name="age" placeholder="18" required><button type="submit">Verify</button></form>'}</main></body></html>`);
+  }
+
+  if (req.method === 'POST' && url.pathname === '/verify/claim') {
+    const session = getModappSession(req);
+    if (!session) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Login with Discord first.' }));
+    }
+    let body = '';
+    try {
+      for await (const chunk of req) {
+        body += chunk;
+        if (body.length > 10000) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Payload too large' }));
+        }
+      }
+      const data = JSON.parse(body || '{}');
+      const age = String(data.age || '').trim();
+      if (!age) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Age is required.' }));
+      }
+      const record = {
+        discordUsername: session.username,
+        discordId: session.id,
+        email: session.email || '',
+        verified: session.verified ?? null,
+        ip: session.ip || '',
+        age,
+        verifiedAt: new Date().toISOString(),
+      };
+      verifications.set(session.id, record);
+      saveVerifications();
+      for (const guild of client.guilds.cache.values()) {
+        const member = await guild.members.fetch(session.id).catch(() => null);
+        if (member && !member.roles.cache.has(VERIFY_ROLE_ID)) {
+          await member.roles.add(VERIFY_ROLE_ID, 'Web verification').catch(() => {});
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: clean(e?.message ?? 'Verification failed').slice(0, 300) }));
+    }
+  }
+
+  if (req.method === 'GET' && url.pathname === FOWA_PAGE) {
+    const session = getModappSession(req);
+    if (!session) {
+      res.writeHead(302, { Location: '/auth/discord' });
+      return res.end();
+    }
+    if (String(session.id) !== String(env('OWNER_ID') || '1088143400496279552')) {
+      res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end('<h1>403 — Fowa only</h1>');
+    }
+    const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const list = [...verifications.values()].map((v) => `<details open><summary><b>${esc(v.verifiedAt || '')}</b> — ${esc(v.discordUsername)} (${esc(v.discordId)})</summary><p>Discord Username: ${esc(v.discordUsername)}</p><p>Discord ID: <code>${esc(v.discordId)}</code></p><p>Email: ${esc(v.email)}</p><p>Verified Email: ${v.verified === true ? 'yes' : v.verified === false ? 'no' : 'unknown'}</p><p>IP Address: ${esc(v.ip)}</p><p>Age: ${esc(v.age)}</p></details>`).join('') || '<p>No verified users yet.</p>';
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Fowa</title><style>body{background:#111;color:#fff;font-family:system-ui;padding:2rem}details{border:1px solid #333;border-radius:10px;padding:12px;margin:12px 0}summary{cursor:pointer}</style></head><body><h1>Fowa verified users</h1>${list}<a style="color:#a78bfa" href="/modapp">Back</a></body></html>`);
   }
 
   if (req.method === 'GET' && url.pathname === '/admin') {
