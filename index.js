@@ -1139,8 +1139,9 @@ const modappServer = http.createServer(async (req, res) => {
       const sessionToken = modappSessionToken;
       saveModappSessions();
       const state = url.searchParams.get('state');
+      const redirectTarget = state === 'verify' ? '/verify' : state === 'fowa' ? '/fowa' : state === 'admin' ? '/admin' : '/modapp';
       res.writeHead(302, {
-        Location: state && state.startsWith('verify') ? '/verify' : '/modapp',
+        Location: redirectTarget,
         'Set-Cookie': `modapp_session=${encodeURIComponent(sessionToken)}; HttpOnly; Path=/; SameSite=Lax`,
       });
       return res.end();
@@ -1164,7 +1165,7 @@ const modappServer = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/verify') {
     const session = getModappSession(req);
     if (!session) {
-      res.writeHead(302, { Location: '/auth/discord' });
+      res.writeHead(302, { Location: '/auth/discord?state=verify' });
       return res.end();
     }
     const record = verifications.get(session.id);
@@ -1220,7 +1221,7 @@ const modappServer = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === FOWA_PAGE) {
     const session = getModappSession(req);
     if (!session) {
-      res.writeHead(302, { Location: '/auth/discord' });
+      res.writeHead(302, { Location: '/auth/discord?state=fowa' });
       return res.end();
     }
     if (String(session.id) !== String(env('OWNER_ID') || '1088143400496279552')) {
@@ -1235,8 +1236,8 @@ const modappServer = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/admin') {
     const session = getModappSession(req);
-    if (!MODAPP_REQUIRE_LOGIN || !session) {
-      res.writeHead(302, { Location: '/auth/discord' });
+    if (!session) {
+      res.writeHead(302, { Location: '/auth/discord?state=admin' });
       return res.end();
     }
     if (String(session.id) !== String(env('OWNER_ID') || '1088143400496279552')) {
